@@ -5,6 +5,7 @@ import ctypes
 import json
 import os
 import shutil
+import uuid
 from ctypes import wintypes
 from pathlib import Path
 from typing import Any
@@ -12,7 +13,8 @@ from typing import Any
 
 APP_NAME = "DataBackupAssistant"
 APP_DISPLAY_NAME = "数据自动备份助手"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.0.0"
+APP_AUTHOR = "Jinchoo（朱锦春）"
 LEGACY_APP_NAME = "DatabaseBackupAssistant"
 
 
@@ -35,6 +37,10 @@ LOG_DIR = app_data_dir() / "logs"
 
 
 DEFAULT_CONFIG: dict[str, Any] = {
+    "backup_jobs": [],
+    "database_backup_enabled": True,
+    "file_backup_enabled": False,
+    "database_targets": [],
     "db_type": "mysql",
     "mysql_host": "127.0.0.1",
     "mysql_port": 3306,
@@ -42,7 +48,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "mysql_password_enc": "",
     "mysql_database": "",
     "sqlite_path": "",
-    "output_dir": str(Path.home() / "Documents" / "DatabaseBackups"),
+    "file_backup_name": "文件备份",
+    "file_sources": [],
+    "file_skip_unreadable": True,
+    "output_dir": str(Path.home() / "Documents" / "DataBackups"),
     "backup_time": "02:00",
     "retention_days": 30,
     "start_with_windows": False,
@@ -133,7 +142,133 @@ class ConfigStore:
             except (OSError, ValueError):
                 loaded = {}
         self.data = {**DEFAULT_CONFIG, **loaded}
+        self.data["database_targets"] = list(
+            self.data.get("database_targets") or []
+        )
+        self.data["backup_jobs"] = list(self.data.get("backup_jobs") or [])
+        if "database_targets" not in loaded:
+            legacy_target = self._legacy_database_target()
+            if legacy_target is not None:
+                self.data["database_targets"] = [legacy_target]
+        if "backup_jobs" not in loaded:
+            self.data["backup_jobs"] = self._legacy_backup_jobs()
         return self.data
+
+    def _legacy_database_target(self) -> dict[str, Any] | None:
+        db_type = str(self.data.get("db_type", "mysql")).lower()
+        if db_type == "mysql" and str(self.data.get("mysql_database", "")).strip():
+            host = str(self.data.get("mysql_host", "127.0.0.1")).strip()
+            port = int(self.data.get("mysql_port", 3306))
+            return {
+                "name": f"MySQL {host}:{port}",
+                "db_type": "mysql",
+                "host": host,
+                "port": port,
+                "user": str(self.data.get("mysql_user", "root")).strip(),
+                "password_enc": str(self.data.get("mysql_password_enc", "")),
+                "databases": [str(self.data["mysql_database"]).strip()],
+            }
+        sqlite_path = str(self.data.get("sqlite_path", "")).strip()
+        if db_type == "sqlite" and sqlite_path:
+            return {
+                "name": f"SQLite {Path(sqlite_path).stem}",
+                "db_type": "sqlite",
+                "sqlite_paths": [sqlite_path],
+            }
+        return None
+
+    def _legacy_backup_jobs(self) -> list[dict[str, Any]]:
+        jobs: list[dict[str, Any]] = []
+        output_dir = str(self.data.get("output_dir", "")).strip()
+        backup_time = str(self.data.get("backup_time", "02:00")).strip()
+        retention_days = self.data.get("retention_days", 30)
+        last_attempt_date = str(self.data.get("last_auto_attempt_date", ""))
+        names: set[str] = set()
+
+        def unique_name(base: str) -> str:
+            candidate = base
+            suffix = 2
+            while candidate.casefold() in names:
+                candidate = f"{base} ({suffix})"
+                suffix += 1
+            names.add(candidate.casefold())
+            return candidate
+
+        for target in self.data.get("database_targets", []):
+            target_name = str(target.get("name", "")).strip() or "数据库"
+            if target.get("db_type") == "sqlite":
+                for path in target.get("sqlite_paths", []):
+                    jobs.append(
+                        {
+                            "id": uuid.uuid4().hex,
+                            "name": unique_name(
+                                f"{target_name} - {Path(path).stem}"
+                            ),
+                            "job_type": "sqlite",
+                            "sqlite_path": str(path),
+                            "output_dir": output_dir,
+                            "backup_time": backup_time,
+                            "retention_days": retention_days,
+                            "last_attempt_date": last_attempt_date,
+                            "last_backup_date": "",
+                            "last_status": "",
+                            "last_backup_file": "",
+                        }
+                    )
+            else:
+                for database in target.get("databases", []):
+                    jobs.append(
+                        {
+                            "id": uuid.uuid4().hex,
+                            "name": unique_name(
+                                f"{target_name} - {database}"
+                            ),
+                            "job_type": "mysql",
+                            "host": str(
+                                target.get("host", "127.0.0.1")
+                            ),
+                            "port": int(target.get("port", 3306)),
+                            "user": str(target.get("user", "root")),
+                            "password_enc": str(
+                                target.get("password_enc", "")
+                            ),
+                            "database": str(database),
+                            "output_dir": output_dir,
+                            "backup_time": backup_time,
+                            "retention_days": retention_days,
+                            "last_attempt_date": last_attempt_date,
+                            "last_backup_date": "",
+                            "last_status": "",
+                            "last_backup_file": "",
+                        }
+                    )
+
+        if bool(self.data.get("file_backup_enabled", False)):
+            file_name = str(
+                self.data.get("file_backup_name", "文件备份")
+            ).strip()
+            for source in self.data.get("file_sources", []):
+                jobs.append(
+                    {
+                        "id": uuid.uuid4().hex,
+                        "name": unique_name(
+                            f"{file_name} - {Path(source).name or '文件'}"
+                        ),
+                        "job_type": "files",
+                        "file_source": str(source),
+                        "file_skip_unreadable": bool(
+                            self.data.get("file_skip_unreadable", True)
+                        ),
+                        "output_dir": output_dir,
+                        "backup_time": backup_time,
+                        "retention_days": retention_days,
+                        "last_attempt_date": last_attempt_date,
+                        "last_backup_date": "",
+                        "last_status": "",
+                        "last_backup_file": "",
+                    }
+                )
+        return jobs
 
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -149,4 +284,26 @@ class ConfigStore:
 
     def set_password(self, password: str) -> None:
         self.data["mysql_password_enc"] = protect_password(password)
+
+
+def database_targets_with_passwords(config: dict[str, Any]) -> list[dict[str, Any]]:
+    hydrated: list[dict[str, Any]] = []
+    for raw_target in config.get("database_targets", []):
+        target = dict(raw_target)
+        target["password"] = unprotect_password(
+            str(target.get("password_enc", ""))
+        )
+        hydrated.append(target)
+    return hydrated
+
+
+def backup_jobs_with_passwords(config: dict[str, Any]) -> list[dict[str, Any]]:
+    hydrated: list[dict[str, Any]] = []
+    for raw_job in config.get("backup_jobs", []):
+        job = dict(raw_job)
+        job["password"] = unprotect_password(
+            str(job.get("password_enc", ""))
+        )
+        hydrated.append(job)
+    return hydrated
 
