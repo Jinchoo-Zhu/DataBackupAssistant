@@ -1,65 +1,59 @@
 # 数据自动备份助手
 
-English name: **DataBackupAssistant**
+**DataBackupAssistant** 是一个面向 Windows 的本地自动备份工具，可统一管理 MySQL / MariaDB、SQLite、文件和文件夹备份任务。
 
-作者：Jinchoo（朱锦春）
+每个备份来源都是独立任务，可以分别设置保存目录、每天执行时间和保留天数。程序支持后台托盘运行、开机自启、立即备份、自动清理和备份结果记录。
 
-版本：V1.0.0
+| 项目 | 信息 |
+| --- | --- |
+| 当前版本 | V1.0.0 |
+| 作者 | Jinchoo（朱锦春） |
+| 运行平台 | Windows |
+| 项目语言 | Python 3.12 |
+| 数据格式 | ZIP |
 
-DataBackupAssistant 是一个面向 Windows 的本地自动备份工具。每个数据库、SQLite 文件、文件或文件夹都是独立任务，可分别设置 ZIP 保存目录、执行时间和保留天数。
+## 界面预览
 
-![界面预览](docs/app-preview.png)
+<p align="center">
+  <img src="docs/app-preview.png" alt="数据自动备份助手主界面" width="920">
+</p>
 
-## 功能
+<p align="center"><sub>主界面：统一管理数据库、SQLite、文件和文件夹备份任务</sub></p>
 
-- 独立备份任务：每个数据库或文件来源分别拥有输出目录、执行时间和保留策略。
-- 多数据库：可以同时添加多台 MySQL / MariaDB 服务器，支持不同端口和不同数据库版本。
-- MySQL / MariaDB：导出 SQL 后压缩为 ZIP。
-- SQLite：生成一致性快照后压缩为 ZIP。
-- 文件与文件夹：直接生成 ZIP，保留目录结构和空文件夹。
-- 添加多个数据库：一次选择多个数据库时，会拆分为多个可独立编辑的任务。
-- 独立定时：程序每分钟检查任务计划，启动较晚时可补做当天未执行任务。
-- 新增任务不会立即补做：如果添加任务时当天的执行时间已经过去，会等待下一次计划时间。
-- 自动清理：每个任务按自己的名称和保留天数清理历史 ZIP。
-- 后台运行：关闭窗口后隐藏到系统托盘，右键托盘可以打开主界面、立即备份或退出。
-- 开机自启：通过当前用户注册表启动，不需要管理员权限。
-- 可靠性：先写临时文件，备份完成并通过校验后再生成正式文件。
-- 密码保护：MySQL 密码使用 Windows DPAPI 按当前用户加密保存。
-- 文件容错：可选择跳过无法读取的文件，并在 ZIP 内的备份说明中记录跳过项。
+<p align="center">
+  <img src="docs/backup-job-dialog.png" alt="添加备份任务" width="720">
+</p>
 
-## MySQL 备份内容
+<p align="center"><sub>添加任务：选择任务类型、数据来源、备份计划并勾选需要备份的数据库</sub></p>
 
-MySQL / MariaDB 备份生成 ZIP，内部包含 `.sql` 文件。SQL 内容包括：
+## 功能特点
 
-- 建库语句与表结构。
-- 表数据、生成列处理。
-- 视图、存储过程、函数、触发器和事件。
-- 外键关闭与恢复指令，便于跨表恢复。
+- **独立任务**：每个数据库、文件或文件夹都拥有自己的保存目录、执行时间和保留策略。
+- **多种来源**：支持 MySQL / MariaDB、SQLite、单个文件以及完整文件夹。
+- **多数据库**：一次读取并勾选多个数据库，保存后自动拆分为多个独立任务。
+- **多服务器**：不同任务可以连接不同主机、端口和账号，适合多实例数据库环境。
+- **自动调度**：程序持续检查任务计划，每个任务每天在指定时间执行一次。
+- **后台运行**：关闭主窗口后可以隐藏到系统托盘，托盘菜单支持打开界面和立即备份。
+- **开机自启**：登录 Windows 后自动启动，不需要管理员权限。
+- **自动清理**：按照每个任务自己的保留天数清理历史备份，不误删其他任务文件。
+- **安全保存密码**：MySQL 密码使用 Windows DPAPI 按当前用户加密。
+- **完整性检查**：备份先写入临时文件，完成并通过校验后才生成正式 ZIP。
+- **文件容错**：文件备份可选择跳过无法读取的文件，并在 `备份说明.txt` 中记录。
 
-InnoDB 数据使用一致性事务快照导出。MyISAM 表无法提供同等的事务级一致性保证。
+## 支持的备份类型
 
-推荐为备份创建专用账号，至少授予：
+| 类型 | 备份方式 | ZIP 内容 |
+| --- | --- | --- |
+| MySQL / MariaDB | 使用一致性事务读取结构、数据和数据库对象，导出 SQL 后压缩 | 原始数据库名对应的 `.sql` 文件、`备份说明.txt` |
+| SQLite | 通过 SQLite 在线备份接口生成一致性快照 | 原始 SQLite 文件、`备份说明.txt` |
+| 文件 | 读取单个文件并压缩 | 原始文件、`备份说明.txt` |
+| 文件夹 | 保留目录结构和空文件夹后压缩 | 原始文件夹、`备份说明.txt` |
 
-```sql
-GRANT SELECT, SHOW VIEW, TRIGGER, EVENT
-ON `你的数据库`.* TO 'backup_user'@'%';
-
-GRANT SHOW_ROUTINE ON *.* TO 'backup_user'@'%';
-```
-
-## 文件备份说明
-
-- 文件任务以来源文件或文件夹名称作为 ZIP 内的根目录。
-- ZIP 中会包含 `备份说明.txt`，记录任务名称、备份时间和原文件路径；如有跳过项会追加记录。
-- 如果保存目录位于某个来源文件夹内部，程序会自动排除保存目录，避免备份文件递归打包自身。
-- 空文件夹也会被保留。
-- 文件备份不是磁盘快照。正在被独占写入的文件可能无法读取；建议启用“跳过无法读取的文件”，或先停止相关应用。
-
-## SQLite 备份
-
-SQLite 使用官方在线备份接口生成一致性 `.sqlite3` 快照，随后压缩为 ZIP，并执行完整性检查。
+MySQL 支持表结构、数据、视图、存储过程、函数、触发器和事件。InnoDB 使用一致性快照；MyISAM 表无法提供同等的事务级一致性保证。
 
 ## 快速开始
+
+### 运行源码
 
 ```powershell
 git clone git@github.com:Jinchoo-zhu/DataBackupAssistant.git
@@ -72,88 +66,136 @@ python -m pip install -r requirements.txt
 python src\app.py
 ```
 
-## 使用流程
+### 使用方式
 
-1. 点击“添加备份任务”，在任务对话框中先选择 MySQL、SQLite 或“文件或文件夹”类型。
-2. 填写任务名称并选择来源。MySQL 可选择多个数据库，保存时自动拆成独立任务。
-3. 文件任务先选择“文件”或“文件夹”类型，再点击“浏览”打开对应的选择窗口。
-4. 在任务中添加该任务自己的保存目录、每天执行时间和保留天数。
-5. 双击列表中的任务可以修改，勾选后点击“删除选中任务”可批量删除。
-6. 勾选任务后点击“备份勾选任务”可立即验证。
-7. 点击“保存设置”保存全部任务。
+1. 点击“添加备份任务”。
+2. 选择 MySQL / MariaDB、SQLite 或“文件或文件夹”。
+3. 填写来源信息、ZIP 保存目录、每天执行时间和保留天数。
+4. MySQL 数据库通过首列复选框选择一个或多个数据库。
+5. 保存任务，然后点击主界面的“保存设置”。
+6. 勾选任务后点击“备份勾选任务”，完成第一次验证。
+7. 建议实际解压并测试一次恢复流程。
 
-## 备份文件命名
+双击任务行可以修改任务；勾选任务后可以批量删除或立即备份。
+
+## 备份计划
+
+- 每个任务按照自己设置的时间执行，不使用统一备份时间。
+- 新增任务或修改执行计划后，如果当天执行时间已经过去，会等待下一天。
+- 程序启动时，已有任务如果当天尚未执行且计划时间已过，可以补做当天备份。
+- 同一天不会自动重复执行同一任务。
+- 手动“备份勾选任务”不受每日自动执行次数限制。
+- 请保持电脑开机并登录 Windows，或在关闭窗口后让程序继续驻留系统托盘。
+
+## 文件命名
+
+外层 ZIP 命名格式：
 
 ```text
 【YYYYMMDDHHMMSS】 任务名称 - 来源名称.zip
 ```
 
-同一目录、同一秒产生多个任务时，后续文件自动命名为
-`【YYYYMMDDHHMMSS】 任务名称 - 来源名称_2.zip`、`_3.zip`，不会覆盖。
+示例：
 
-## 恢复
-
-MySQL：
-
-```powershell
-Expand-Archive '.\【20261101020000】 任务名称 - 来源名称.zip' -DestinationPath .\restore
-mysql -u root -p < .\restore\数据库名.sql
+```text
+【20261103020000】 MySQL 数据库备份 - equipment.zip
 ```
 
-SQLite：
+同一秒、同一目录生成多个 ZIP 时，程序会自动追加 `_2`、`_3`，不会覆盖已有文件。
 
-1. 解压 ZIP。
-2. 停止正在写入数据库的程序。
-3. 保留原数据库文件副本。
-4. 用解压出的原始 SQLite 文件替换原数据库文件。
+ZIP 内使用原始数据库、文件或文件夹名称。每个 ZIP 还包含 `备份说明.txt`，记录任务、备份时间和来源路径。
 
-文件：
+## MySQL 备份账号
 
-使用任意 ZIP 工具解压。备份说明文件仅用于记录本次任务，不需要恢复到业务目录。
+建议为自动备份创建专用账号。最低权限示例：
 
-## 文件位置
+```sql
+GRANT SELECT, SHOW VIEW, TRIGGER, EVENT
+ON `你的数据库`.* TO 'backup_user'@'%';
 
-- 配置：`%APPDATA%\DataBackupAssistant\config.json`
-- 日志：`%APPDATA%\DataBackupAssistant\logs\backup.log`
-- 默认备份目录：`%USERPROFILE%\Documents\DataBackups`
+GRANT SHOW_ROUTINE ON *.* TO 'backup_user'@'%';
+```
 
-旧名称 `DatabaseBackupAssistant` 的配置会在首次启动时自动迁移。
+如需恢复用户权限或跨实例迁移，应使用具备相应权限的恢复账号。建议 MySQL 备份密码使用英文、数字和常用符号，避免跨系统编码兼容问题。
+
+## 恢复备份
+
+### MySQL / MariaDB
+
+```powershell
+Expand-Archive '.\【20261103020000】 MySQL 数据库备份 - equipment.zip' -DestinationPath .\restore
+mysql -u root -p < .\restore\equipment.sql
+```
+
+### SQLite
+
+1. 解压任务 ZIP。
+2. 停止正在写入该 SQLite 文件的程序。
+3. 备份原数据库文件。
+4. 使用 ZIP 中的原始 SQLite 文件替换原文件。
+
+### 文件或文件夹
+
+使用任意 ZIP 工具解压。`备份说明.txt` 仅用于记录备份信息，不需要恢复到业务目录。
+
+## 配置与日志
+
+| 内容 | 位置 |
+| --- | --- |
+| 配置文件 | `%APPDATA%\DataBackupAssistant\config.json` |
+| 运行日志 | `%APPDATA%\DataBackupAssistant\logs\backup.log` |
+| 默认备份目录 | `%USERPROFILE%\Documents\DataBackups` |
+
+旧名称 `DatabaseBackupAssistant` 的配置会在首次启动新版时自动迁移，旧配置不会主动删除。
 
 ## 命令行
 
 ```powershell
-# 自检数据库、文件 ZIP、完整性校验、密码加密和保留策略
+# 检查数据库、SQLite、文件 ZIP、密码加密和保留策略
 python src\app.py --self-test
 
-# 使用当前配置执行一次备份
+# 按照当前配置立即执行所有任务
 python src\app.py --backup-once
 
-# 隐藏主窗口启动到系统托盘
+# 隐藏主窗口并启动到系统托盘
 python src\app.py --minimized
+```
+
+## 测试
+
+```powershell
+python -m unittest discover -s tests -v
+python src\app.py --self-test
+```
+
+编码和静态检查：
+
+```powershell
+.\.venv\Scripts\ruff.exe check src tests
+.\.venv\Scripts\vulture.exe src tests
 ```
 
 ## 构建 EXE
 
-使用项目虚拟环境直接运行 Spec：
+项目提供 PyInstaller Spec 文件和构建脚本。
+
+直接构建：
 
 ```powershell
 .\.venv\Scripts\python.exe -m PyInstaller --noconfirm --clean DataBackupAssistant.spec
 ```
 
-默认生成：
+输出：
 
 ```text
 dist\数据自动备份助手.exe
 ```
 
-也可以使用构建脚本，将成品统一输出到 `outputs`：
+使用构建脚本时，会先重新生成图标，再把成品输出到 `outputs`：
 
 ```powershell
-python -m pip install -r requirements.txt
 powershell -ExecutionPolicy Bypass -File .\build.ps1
 ```
-
-生成文件：
 
 ```text
 outputs\数据自动备份助手.exe
@@ -163,52 +205,42 @@ outputs\数据自动备份助手.exe
 
 ```text
 DataBackupAssistant/
-├── assets/
-│   ├── app.ico
-│   ├── app.png
-│   ├── app-48.png
-│   ├── app-source.png
-│   ├── checkbox-checked.png
-│   └── checkbox-unchecked.png
-├── docs/
-│   └── app-preview.png
+├── assets/                    # 程序图标、任务栏图标和复选框图片
+├── docs/                      # README 界面截图
 ├── src/
-│   ├── app.py
-│   ├── backup_engine.py
-│   ├── config_store.py
-│   ├── backup_job_dialog.py
-│   ├── centered_dialogs.py
-│   └── windows_integration.py
+│   ├── app.py                 # 主界面、调度、托盘和命令行入口
+│   ├── backup_engine.py       # 数据库与文件备份引擎
+│   ├── backup_job_dialog.py   # 添加/编辑备份任务
+│   ├── centered_dialogs.py    # 居中提示框
+│   ├── config_store.py        # 配置、密码加密和旧配置迁移
+│   └── windows_integration.py # 开机自启与窗口定位
 ├── tests/
 │   └── test_core.py
+├── create_icon.py             # 生成 PNG 与多尺寸 ICO
 ├── DataBackupAssistant.spec
 ├── build.ps1
-├── create_icon.py
 ├── requirements.txt
 ├── version_info.txt
 ├── README.md
 └── 使用说明.md
 ```
 
-运行单元测试：
+## 已知限制
 
-```powershell
-python -m unittest discover -s tests -v
-```
+- 文件备份不是磁盘快照，正在被独占写入的文件可能无法读取。
+- MyISAM 表无法提供 InnoDB 级别的一致性事务保证。
+- 开机自启需要用户登录 Windows，不能替代 Windows 服务。
+- 本地备份不能代替异地备份。重要数据应至少保存到另一块磁盘、NAS 或云端。
 
 ## 后续方向
 
-程序的数据模型和备份引擎已按“文件与数据库统一备份”拆分。后续可继续增加：
-
-- 文件增量备份、排除规则和单文件历史版本。
-- Windows VSS 卷影复制，备份正在使用的文件。
-- PostgreSQL、SQL Server 等数据库引擎。
+- Windows VSS 卷影复制。
+- 文件增量备份、排除规则和历史版本。
+- PostgreSQL、SQL Server 等数据库。
 - 备份完成后同步到 NAS、对象存储或云盘。
 
-## 注意事项
+---
 
-- 每个 MySQL 数据库会显示为独立任务，可分别设置目录、时间和保留策略。
-- 新增或刚修改的任务如果已经错过当天时间，不会立刻自动备份；如需立即执行，请手动勾选后点击“备份勾选任务”。
-- 请在备份时间保持电脑开机并登录 Windows，或让程序常驻系统托盘。
-- 本地备份不能代替异地备份，重要数据应至少保留一份到其他磁盘、NAS 或云端。
-- 首次使用前请执行一次“立即备份”，并实际验证恢复流程。
+作者：**Jinchoo（朱锦春）**
+
+当前版本：**V1.0.0**
