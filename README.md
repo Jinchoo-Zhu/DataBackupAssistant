@@ -56,7 +56,7 @@ MySQL 支持表结构、数据、视图、存储过程、函数、触发器和�
 ### 运行源码
 
 ```powershell
-git clone git@github.com:Jinchoo-Zhu/AnhuToolbox.git
+git clone git@github.com:Jinchoo-Zhu/DataBackupAssistant.git
 cd DataBackupAssistant
 
 python -m venv .venv
