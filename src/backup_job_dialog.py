@@ -5,8 +5,10 @@ import queue
 import sys
 import threading
 import tkinter as tk
+from collections.abc import Callable
 from pathlib import Path
 from tkinter import filedialog, ttk
+from typing import ClassVar
 
 from backup_engine import BackupError, list_mysql_databases, test_sqlite
 from centered_dialogs import askyesno, showerror, showinfo
@@ -31,17 +33,6 @@ MUTED = "#666666"
 ACCENT = "#0078D4"
 ACCENT_DARK = "#106EBE"
 ACCENT_SOFT = "#E8F0FE"
-
-
-def _center_window(window: tk.Toplevel, parent: tk.Misc) -> None:
-    def center() -> None:
-        if not window.winfo_exists():
-            return
-        center_window_over_parent(window, parent)
-
-    window.after_idle(center)
-
-
 def _resource_path(name: str) -> Path:
     if getattr(sys, "frozen", False):
         base = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
@@ -200,13 +191,32 @@ class SourceKindRadio(tk.Frame):
 
 
 class BackupJobDialog(tk.Toplevel):
-    TYPE_LABELS = {
+    TYPE_LABELS: ClassVar[dict[str, str]] = {
         "mysql": "MySQL / MariaDB",
         "sqlite": "SQLite",
         "files": "文件或文件夹",
     }
+    LABEL_FONT = ("Microsoft YaHei UI", 9)
+    LABEL_PADDING_X = (8, 14)
+    ALIGNED_LABELS = (
+        "任务名称",
+        "任务类型",
+        "服务器地址",
+        "用户名",
+        "密码",
+        "数据库",
+        "数据库文件",
+        "来源类型",
+        "备份来源",
+    )
 
-    def __init__(self, parent: tk.Misc, job: dict | None = None) -> None:
+    def __init__(
+        self,
+        parent: tk.Misc,
+        job: dict | None = None,
+        *,
+        submit_validator: Callable[[list[dict]], str | None] | None = None,
+    ) -> None:
         super().__init__(parent)
         self.withdraw()
         self._shown = False
@@ -215,9 +225,12 @@ class BackupJobDialog(tk.Toplevel):
         self.job = dict(job or {})
         self._editing = bool(self.job.get("id") or self.job.get("name"))
         self._owner = parent
+        self._submit_validator = submit_validator
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
         self.checkbox_checked_image: tk.PhotoImage | None = None
         self.checkbox_unchecked_image: tk.PhotoImage | None = None
+        self.checkbox_checked_cell_image: tk.PhotoImage | None = None
+        self.checkbox_unchecked_cell_image: tk.PhotoImage | None = None
         try:
             self.checkbox_checked_image = tk.PhotoImage(
                 file=str(_resource_path("checkbox-checked.png"))
@@ -225,12 +238,21 @@ class BackupJobDialog(tk.Toplevel):
             self.checkbox_unchecked_image = tk.PhotoImage(
                 file=str(_resource_path("checkbox-unchecked.png"))
             )
+            self.checkbox_checked_cell_image = self._tree_checkbox_image(
+                self.checkbox_checked_image
+            )
+            self.checkbox_unchecked_cell_image = self._tree_checkbox_image(
+                self.checkbox_unchecked_image
+            )
         except tk.TclError:
             self.checkbox_checked_image = None
             self.checkbox_unchecked_image = None
+            self.checkbox_checked_cell_image = None
+            self.checkbox_unchecked_cell_image = None
         self.saved_mysql_databases = [
             str(self.job.get("database", ""))
         ] if self.job.get("database") else []
+        self.checked_mysql_databases = set(self.saved_mysql_databases)
 
         self.title("编辑备份任务" if self._editing else "添加备份任务")
         self.configure(bg=BG)
@@ -331,6 +353,20 @@ class BackupJobDialog(tk.Toplevel):
         )
         self.type_combo.grid(row=1, column=1, sticky="ew", pady=(0, 10))
         self.type_combo.bind("<<ComboboxSelected>>", self._on_type_change)
+        self.type_combo.bind(
+            "<FocusIn>",
+            lambda _event: self.after_idle(
+                self.type_combo.selection_clear
+            ),
+            add="+",
+        )
+        self.type_combo.bind(
+            "<<ComboboxSelected>>",
+            lambda _event: self.after_idle(
+                self.type_combo.selection_clear
+            ),
+            add="+",
+        )
 
         source_host = tk.Frame(form, bg=PANEL)
         source_host.grid(row=2, column=0, columnspan=2, sticky="nsew")
@@ -351,6 +387,12 @@ class BackupJobDialog(tk.Toplevel):
         self.files_page.grid(row=0, column=0, sticky="nsew")
         self.files_page.grid_columnconfigure(1, weight=1)
         self._build_files_page()
+        self._align_label_columns(
+            form,
+            self.mysql_page,
+            self.sqlite_page,
+            self.files_page,
+        )
 
         plan = tk.Frame(
             form,
@@ -366,7 +408,7 @@ class BackupJobDialog(tk.Toplevel):
             pady=(10, 0),
         )
         plan.grid_columnconfigure(1, weight=1)
-        self._label(plan, "保存目录", 0, row_pady=6)
+        self._label(plan, "保存目录", 0, row_pady=(6, 6))
         output_row = tk.Frame(plan, bg=PANEL_ALT)
         output_row.grid(row=0, column=1, sticky="ew", pady=(6, 6), padx=(0, 8))
         output_row.grid_columnconfigure(0, weight=1)
@@ -401,7 +443,7 @@ class BackupJobDialog(tk.Toplevel):
             font=("Microsoft YaHei UI", 9),
         ).pack(side="left")
 
-        self._label(plan, "保留天数", 2, row_pady=2)
+        self._label(plan, "保留天数", 2, row_pady=8)
         keep_row = tk.Frame(plan, bg=PANEL_ALT)
         keep_row.grid(row=2, column=1, sticky="w", pady=(0, 8), padx=(0, 8))
         ttk.Entry(
@@ -474,24 +516,70 @@ class BackupJobDialog(tk.Toplevel):
             highlightthickness=1,
         )
         db_frame.grid(row=3, column=1, sticky="ew", pady=(0, 4))
+        db_frame.grid_rowconfigure(0, weight=1)
         db_frame.grid_columnconfigure(0, weight=1)
-        db_scroll = ttk.Scrollbar(db_frame)
+        db_scroll = ttk.Scrollbar(db_frame, orient="vertical")
         db_scroll.grid(row=0, column=1, sticky="ns")
-        self.database_list = tk.Listbox(
+        self.database_tree = ttk.Treeview(
             db_frame,
-            selectmode=tk.EXTENDED,
-            activestyle="none",
-            height=5,
-            bg=PANEL,
-            fg=TEXT,
-            selectbackground=ACCENT_SOFT,
-            selectforeground=TEXT,
-            relief="flat",
-            borderwidth=0,
-            yscrollcommand=db_scroll.set,
+            columns=("database",),
+            show=("tree", "headings"),
+            height=3,
+            selectmode="extended",
         )
-        self.database_list.grid(row=0, column=0, sticky="ew", padx=4, pady=3)
-        db_scroll.config(command=self.database_list.yview)
+        self.database_tree.heading(
+            "#0",
+            text="选择",
+            anchor="center",
+            command=self._toggle_all_mysql_databases,
+        )
+        self.database_tree.column(
+            "#0",
+            width=76,
+            minwidth=76,
+            stretch=False,
+            anchor="center",
+        )
+        self.database_tree.heading(
+            "database",
+            text="数据库名称",
+            anchor="w",
+        )
+        self.database_tree.column(
+            "database",
+            width=520,
+            minwidth=140,
+            stretch=True,
+            anchor="w",
+        )
+        self.database_tree.grid(
+            row=0,
+            column=0,
+            sticky="nsew",
+            padx=3,
+            pady=3,
+        )
+        db_scroll.config(command=self.database_tree.yview)
+        self._bind_database_scrollbar(self.database_tree, db_scroll)
+        self.database_tree.bind(
+            "<ButtonPress-1>",
+            self._block_database_checkbox_resize,
+            add="+",
+        )
+        self.database_tree.bind(
+            "<Motion>",
+            self._update_database_resize_cursor,
+            add="+",
+        )
+        self.database_tree.bind(
+            "<Leave>",
+            lambda _event: self.database_tree.configure(cursor=""),
+            add="+",
+        )
+        self.database_tree.bind(
+            "<ButtonRelease-1>",
+            self._handle_mysql_database_click,
+        )
         self._populate_mysql_databases(self.saved_mysql_databases)
         self.load_button = ttk.Button(
             self.mysql_page,
@@ -502,7 +590,7 @@ class BackupJobDialog(tk.Toplevel):
         self.load_button.grid(row=4, column=1, sticky="w", pady=(0, 3))
         ttk.Label(
             self.mysql_page,
-            text="按住 Ctrl 或 Shift 可选择多个数据库，保存后会生成独立任务。",
+            text="勾选要备份的数据库，保存后会为每个勾选项生成独立任务。",
             style="Muted.TLabel",
         ).grid(row=5, column=1, sticky="w")
 
@@ -569,21 +657,160 @@ class BackupJobDialog(tk.Toplevel):
         parent: tk.Misc,
         text: str,
         row: int,
-        row_pady: int = 8,
+        row_pady: int | tuple[int, int] = 8,
     ) -> None:
+        label_pady = (
+            row_pady
+            if isinstance(row_pady, tuple)
+            else (0, row_pady)
+        )
         tk.Label(
             parent,
             text=text,
             bg=parent.cget("bg"),
             fg=MUTED,
-            font=("Microsoft YaHei UI", 9),
+            font=self.LABEL_FONT,
         ).grid(
             row=row,
             column=0,
-            sticky="nw",
-            padx=(8, 14),
-            pady=(0, row_pady),
+            sticky="w",
+            padx=self.LABEL_PADDING_X,
+            pady=label_pady,
         )
+
+    def _align_label_columns(self, *parents: tk.Misc) -> None:
+        labels = [
+            child
+            for parent in parents
+            for child in parent.winfo_children()
+            if isinstance(child, tk.Label)
+            and str(child.cget("text")) in self.ALIGNED_LABELS
+        ]
+        if not labels:
+            return
+
+        column_width = max(label.winfo_reqwidth() for label in labels)
+        column_width += sum(self.LABEL_PADDING_X)
+        for parent in parents:
+            parent.grid_columnconfigure(0, minsize=column_width)
+
+    @staticmethod
+    def _tree_checkbox_image(image: tk.PhotoImage) -> tk.PhotoImage:
+        # Treeview reserves indentation at the left of #0. Offset the image
+        # so the visible indicator is centered inside the selection column.
+        padded = tk.PhotoImage(width=image.width() + 10, height=image.height())
+        padded.tk.call(padded.name, "copy", image.name, "-to", 10, 0)
+        return padded
+
+    def _set_mysql_database_checkbox(
+        self,
+        item: str,
+        checked: bool,
+    ) -> None:
+        image = (
+            self.checkbox_checked_cell_image
+            if checked
+            else self.checkbox_unchecked_cell_image
+        )
+        if image is not None:
+            self.database_tree.item(item, image=image, text="")
+        else:
+            self.database_tree.item(item, text="✓" if checked else "□")
+
+    def _handle_mysql_database_click(
+        self,
+        event: tk.Event,
+    ) -> None:
+        if (
+            self.database_tree.identify_region(event.x, event.y)
+            not in {"tree", "cell"}
+            or self.database_tree.identify_column(event.x) != "#0"
+        ):
+            return
+        item = self.database_tree.identify_row(event.y)
+        if not item:
+            return
+        name = self.database_tree.set(item, "database")
+        if name in self.checked_mysql_databases:
+            self.checked_mysql_databases.remove(name)
+        else:
+            self.checked_mysql_databases.add(name)
+        self._set_mysql_database_checkbox(
+            item,
+            name in self.checked_mysql_databases,
+        )
+
+    def _toggle_all_mysql_databases(self) -> None:
+        items = self.database_tree.get_children()
+        if not items:
+            return
+        names = {
+            self.database_tree.set(item, "database")
+            for item in items
+        }
+        select_all = not names.issubset(self.checked_mysql_databases)
+        if select_all:
+            self.checked_mysql_databases.update(names)
+        else:
+            self.checked_mysql_databases.difference_update(names)
+        for item in items:
+            name = self.database_tree.set(item, "database")
+            self._set_mysql_database_checkbox(
+                item,
+                name in self.checked_mysql_databases,
+            )
+
+    def _block_database_checkbox_resize(self, event: tk.Event) -> str | None:
+        if (
+            self.database_tree.identify_region(event.x, event.y)
+            == "separator"
+            and self.database_tree.identify_column(event.x) in {"#0", "#1"}
+        ):
+            return "break"
+        return None
+
+    def _update_database_resize_cursor(self, event: tk.Event) -> None:
+        locked = (
+            self.database_tree.identify_region(event.x, event.y)
+            == "separator"
+            and self.database_tree.identify_column(event.x) in {"#0", "#1"}
+        )
+        self.database_tree.configure(cursor="no" if locked else "")
+
+    def _bind_database_scrollbar(
+        self,
+        tree: ttk.Treeview,
+        scrollbar: ttk.Scrollbar,
+    ) -> None:
+        visible = True
+
+        def sync(first: str, last: str) -> None:
+            nonlocal visible
+            scrollbar.set(first, last)
+            needs_scrollbar = bool(tree.get_children()) and not (
+                float(first) <= 0.0 and float(last) >= 1.0
+            )
+            if needs_scrollbar == visible:
+                return
+            if needs_scrollbar:
+                scrollbar.grid()
+            else:
+                scrollbar.grid_remove()
+            visible = needs_scrollbar
+
+        self._database_scroll_sync = sync
+        tree.configure(yscrollcommand=sync)
+        tree.bind(
+            "<Configure>",
+            lambda _event: self.after_idle(self._sync_database_scrollbar),
+            add="+",
+        )
+
+    def _sync_database_scrollbar(self) -> None:
+        if not self.winfo_exists():
+            return
+        first, last = self.database_tree.yview()
+        self._database_scroll_sync(str(first), str(last))
 
     def _create_checkbutton(
         self,
@@ -628,21 +855,24 @@ class BackupJobDialog(tk.Toplevel):
 
     def _on_type_change(self, _event: tk.Event | None = None) -> None:
         job_type = self._selected_type()
+        default_names = {
+            "mysql": "MySQL 数据库备份",
+            "sqlite": "SQLite 备份",
+            "files": "文件备份",
+        }
         self.mysql_page.grid_remove()
         self.sqlite_page.grid_remove()
         self.files_page.grid_remove()
         if job_type == "mysql":
             self.mysql_page.grid()
-            if not self.name_var.get():
-                self.name_var.set("MySQL 数据库备份")
         elif job_type == "sqlite":
             self.sqlite_page.grid()
-            if not self.name_var.get():
-                self.name_var.set("SQLite 备份")
         else:
             self.files_page.grid()
-            if not self.name_var.get():
-                self.name_var.set("文件备份")
+        if _event is not None or (
+            not self._editing and not self.name_var.get().strip()
+        ):
+            self.name_var.set(default_names[job_type])
         self.after(60, self._resize_to_content)
 
     def _resize_to_content(self) -> None:
@@ -689,7 +919,7 @@ class BackupJobDialog(tk.Toplevel):
             try:
                 names = list_mysql_databases(config)
                 self.events.put(("databases", (names, selected)))
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 self.events.put(("error", str(exc)))
 
         threading.Thread(target=worker, daemon=True).start()
@@ -701,7 +931,7 @@ class BackupJobDialog(tk.Toplevel):
             while True:
                 kind, payload = self.events.get_nowait()
                 if kind == "databases":
-                    names, selected = payload
+                    names, _selected = payload
                     names = list(names)
                     self._populate_mysql_databases(names)
                     self.status_var.set(
@@ -717,21 +947,34 @@ class BackupJobDialog(tk.Toplevel):
         self.after(120, self._poll_events)
 
     def _selected_mysql_databases(self) -> list[str]:
-        return [
-            self.database_list.get(index)
-            for index in self.database_list.curselection()
-        ]
+        selected: list[str] = []
+        for item in self.database_tree.get_children():
+            name = self.database_tree.set(item, "database")
+            if name in self.checked_mysql_databases:
+                selected.append(name)
+        return selected
 
     def _populate_mysql_databases(self, names: list[str]) -> None:
-        selected = set(self._selected_mysql_databases())
-        selected.update(self.saved_mysql_databases)
+        selected = set(self.checked_mysql_databases)
         all_names = list(dict.fromkeys([*names, *selected]))
-        self.database_list.delete(0, "end")
-        for name in all_names:
-            self.database_list.insert("end", name)
-        for index, name in enumerate(all_names):
-            if name in selected:
-                self.database_list.selection_set(index)
+        for item in self.database_tree.get_children():
+            self.database_tree.delete(item)
+        for index, name in enumerate(all_names, 1):
+            item = f"database-{index}"
+            self.database_tree.insert(
+                "",
+                "end",
+                iid=item,
+                values=(name,),
+                tags=("row_odd" if index % 2 == 0 else "row_even",),
+            )
+            self._set_mysql_database_checkbox(
+                item,
+                name in self.checked_mysql_databases,
+            )
+        self.database_tree.tag_configure("row_even", background=PANEL)
+        self.database_tree.tag_configure("row_odd", background=PANEL_ALT)
+        self.after_idle(self._sync_database_scrollbar)
 
     def _browse_sqlite(self) -> None:
         path = filedialog.askopenfilename(
@@ -782,14 +1025,28 @@ class BackupJobDialog(tk.Toplevel):
         if path:
             self.output_dir_var.set(path)
 
+    def _show_save_error(self, title: str, message: str) -> None:
+        messagebox.showerror(title, message, parent=self)
+        if not self.winfo_exists():
+            return
+        self.deiconify()
+        self.lift()
+        self.focus_force()
+        try:
+            self.grab_set()
+        except tk.TclError:
+            pass
+
     def _save(self) -> None:
+        self.result = None
+        self.results = None
         name = self.name_var.get().strip()
         output_dir = self.output_dir_var.get().strip()
         if not name:
-            messagebox.showerror("设置有误", "请填写任务名称。", parent=self)
+            self._show_save_error("设置有误", "请填写任务名称。")
             return
         if not output_dir:
-            messagebox.showerror("设置有误", "请选择该任务的保存目录。", parent=self)
+            self._show_save_error("设置有误", "请选择该任务的保存目录。")
             return
         try:
             parsed_time = dt.datetime.strptime(self.backup_time_var.get(), "%H:%M")
@@ -797,7 +1054,7 @@ class BackupJobDialog(tk.Toplevel):
             if not 0 <= retention_days <= 3650:
                 raise ValueError("保留天数必须在 0 到 3650 之间")
         except ValueError as exc:
-            messagebox.showerror("设置有误", str(exc), parent=self)
+            self._show_save_error("设置有误", str(exc))
             return
 
         result = dict(self.job)
@@ -822,7 +1079,7 @@ class BackupJobDialog(tk.Toplevel):
                 if not databases:
                     raise ValueError("请先读取并选择至少一个数据库")
             except ValueError as exc:
-                messagebox.showerror("设置有误", str(exc), parent=self)
+                self._show_save_error("设置有误", str(exc))
                 return
             result.update(
                 {
@@ -842,16 +1099,15 @@ class BackupJobDialog(tk.Toplevel):
         elif job_type == "sqlite":
             sqlite_path = self.sqlite_path_var.get().strip()
             if not Path(sqlite_path).is_file():
-                messagebox.showerror(
+                self._show_save_error(
                     "设置有误",
                     "请选择有效的 SQLite 数据库文件。",
-                    parent=self,
                 )
                 return
             try:
                 test_sqlite(sqlite_path)
             except BackupError as exc:
-                messagebox.showerror("SQLite 检查失败", str(exc), parent=self)
+                self._show_save_error("SQLite 检查失败", str(exc))
                 return
             result["sqlite_path"] = sqlite_path
             self.results = [result]
@@ -859,35 +1115,40 @@ class BackupJobDialog(tk.Toplevel):
             source = self.file_source_var.get().strip()
             source_path = Path(source)
             if not source or not source_path.exists():
-                messagebox.showerror(
+                self._show_save_error(
                     "设置有误",
                     "请选择有效的文件或文件夹。",
-                    parent=self,
                 )
                 return
             if (
                 self.file_source_kind_var.get() == "folder"
                 and not source_path.is_dir()
             ):
-                messagebox.showerror(
+                self._show_save_error(
                     "设置有误",
                     "来源类型是文件夹，但选择的路径不是文件夹。",
-                    parent=self,
                 )
                 return
             if (
                 self.file_source_kind_var.get() == "file"
                 and not source_path.is_file()
             ):
-                messagebox.showerror(
+                self._show_save_error(
                     "设置有误",
                     "来源类型是文件，但选择的路径不是文件。",
-                    parent=self,
                 )
                 return
             result["file_source"] = source
             result["file_source_kind"] = self.file_source_kind_var.get()
             result["file_skip_unreadable"] = self.skip_unreadable_var.get()
             self.results = [result]
+
+        if self._submit_validator is not None and self.results is not None:
+            validation_error = self._submit_validator(self.results)
+            if validation_error:
+                self.result = None
+                self.results = None
+                self._show_save_error("无法保存", validation_error)
+                return
         self.result = self.results[0] if self.results else None
         self.destroy()

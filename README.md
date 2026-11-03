@@ -74,11 +74,11 @@ python src\app.py
 
 ## 使用流程
 
-1. 点击“添加 MySQL”“添加 SQLite”或“添加文件/文件夹”。
+1. 点击“添加备份任务”，在任务对话框中先选择 MySQL、SQLite 或“文件或文件夹”类型。
 2. 填写任务名称并选择来源。MySQL 可选择多个数据库，保存时自动拆成独立任务。
 3. 文件任务先选择“文件”或“文件夹”类型，再点击“浏览”打开对应的选择窗口。
 4. 在任务中添加该任务自己的保存目录、每天执行时间和保留天数。
-5. 双击列表中的任务可以修改，勾选后点击“删除勾选任务”可批量删除。
+5. 双击列表中的任务可以修改，勾选后点击“删除选中任务”可批量删除。
 6. 勾选任务后点击“备份勾选任务”可立即验证。
 7. 点击“保存设置”保存全部任务。
 
@@ -177,7 +177,10 @@ DataBackupAssistant/
 │   ├── backup_engine.py
 │   ├── config_store.py
 │   ├── backup_job_dialog.py
+│   ├── centered_dialogs.py
 │   └── windows_integration.py
+├── tests/
+│   └── test_core.py
 ├── DataBackupAssistant.spec
 ├── build.ps1
 ├── create_icon.py
@@ -185,6 +188,12 @@ DataBackupAssistant/
 ├── version_info.txt
 ├── README.md
 └── 使用说明.md
+```
+
+运行单元测试：
+
+```powershell
+python -m unittest discover -s tests -v
 ```
 
 ## 后续方向

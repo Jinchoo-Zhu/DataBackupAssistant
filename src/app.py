@@ -11,27 +11,27 @@ import sys
 import tempfile
 import threading
 import time
+import tkinter as tk
 import traceback
 import uuid
 import zipfile
+from collections.abc import Callable
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from tkinter import filedialog
-import tkinter as tk
 from tkinter import ttk
-from typing import Callable
 
 from backup_engine import (
     BackupResult,
     _format_size,
     apply_retention,
     run_backup_job,
-    run_backup_tasks,
 )
+from backup_job_dialog import BackupJobDialog
+from centered_dialogs import askyesno, showerror, showinfo
 from config_store import (
-    APP_NAME,
     APP_AUTHOR,
     APP_DISPLAY_NAME,
+    APP_NAME,
     APP_VERSION,
     LOG_DIR,
     ConfigStore,
@@ -39,8 +39,6 @@ from config_store import (
     protect_password,
     unprotect_password,
 )
-from backup_job_dialog import BackupJobDialog
-from centered_dialogs import askyesno, showerror, showinfo
 from windows_integration import set_autostart
 
 
@@ -111,7 +109,6 @@ class ImageCheckbutton(tk.Frame):
         self.command = command
         self._checked_image = checked_image
         self._unchecked_image = unchecked_image
-        self._background = background
         self._image_label = tk.Label(
             self,
             image=unchecked_image,
@@ -164,85 +161,6 @@ class ImageCheckbutton(tk.Frame):
                 pass
 
 
-class PageTab(tk.Frame):
-    """AnhuSimMate 风格的固定页签，选中时显示浅蓝背景和左侧强调条。"""
-
-    def __init__(
-        self,
-        parent: tk.Misc,
-        *,
-        text: str,
-        icon: str,
-        command: Callable[[], None],
-    ) -> None:
-        super().__init__(parent, bg="#FAFAFA", width=156, height=42, cursor="hand2")
-        self.command = command
-        self._active = False
-        self._hovered = False
-        self.pack_propagate(False)
-        self.indicator = tk.Frame(self, bg="#FAFAFA", width=3)
-        self.indicator.pack(side="left", fill="y")
-        self.icon_label = tk.Label(
-            self,
-            text=icon,
-            bg="#FAFAFA",
-            fg=MUTED,
-            width=2,
-            anchor="center",
-            font=("Segoe UI Symbol", 11),
-            cursor="hand2",
-        )
-        self.icon_label.pack(side="left", padx=(10, 7), fill="y")
-        self.text_label = tk.Label(
-            self,
-            text=text,
-            bg="#FAFAFA",
-            fg=MUTED,
-            anchor="w",
-            font=("Microsoft YaHei UI", 9),
-            cursor="hand2",
-        )
-        self.text_label.pack(side="left", fill="both", expand=True)
-        for widget in (self, self.icon_label, self.text_label):
-            widget.bind("<Button-1>", self._invoke)
-            widget.bind("<Enter>", self._enter)
-            widget.bind("<Leave>", self._leave)
-        self.bind("<space>", self._invoke)
-        self.bind("<Return>", self._invoke)
-
-    def _invoke(self, _event: tk.Event | None = None) -> str:
-        self.command()
-        return "break"
-
-    def _enter(self, _event: tk.Event | None = None) -> None:
-        self._hovered = True
-        self._draw()
-
-    def _leave(self, _event: tk.Event | None = None) -> None:
-        self._hovered = False
-        self._draw()
-
-    def set_active(self, active: bool) -> None:
-        self._active = active
-        self._draw()
-
-    def _draw(self) -> None:
-        background = ACCENT_SOFT if self._active else (
-            "#E8E8E8" if self._hovered else "#FAFAFA"
-        )
-        foreground = ACCENT_DARK if self._active else MUTED
-        for widget in (self, self.icon_label, self.text_label):
-            widget.configure(bg=background)
-        self.icon_label.configure(fg=foreground)
-        self.text_label.configure(
-            fg=foreground,
-            font=(
-                "Microsoft YaHei UI",
-                9,
-                "bold" if self._active else "normal",
-            ),
-        )
-        self.indicator.configure(bg=ACCENT if self._active else background)
 
 
 def acquire_single_instance():
@@ -255,7 +173,7 @@ def acquire_single_instance():
 
 
 class BackupScheduler(threading.Thread):
-    def __init__(self, app: "BackupApp") -> None:
+    def __init__(self, app: BackupApp) -> None:
         super().__init__(name="backup-scheduler", daemon=True)
         self.app = app
         self.stop_event = threading.Event()
@@ -270,13 +188,7 @@ class BackupScheduler(threading.Thread):
                 if not self.app.backup_running:
                     due_ids = self.app.get_due_job_ids()
                     if due_ids:
-                        self.app.root.after(
-                            0,
-                            lambda ids=due_ids: self.app.start_jobs_by_id(
-                                ids,
-                                auto=True,
-                            ),
-                        )
+                        self.app.events.put(("jobs_due", due_ids))
             except Exception:
                 self.app.logger.exception("定时调度检查失败")
             self.stop_event.wait(15)
@@ -293,7 +205,6 @@ class BackupApp:
         self.backup_running = False
         self.tray_icon = None
         self._closing = False
-        self._next_run_after_id = None
         self._build_variables()
         self._load_checkbox_images()
         self._configure_window()
@@ -311,22 +222,14 @@ class BackupApp:
     def _build_variables(self) -> None:
         self.backup_jobs: list[dict] = []
         self.job_checked: set[str] = set()
-        self.file_backup_name = tk.StringVar(value="文件备份")
-        self.file_skip_unreadable = tk.BooleanVar(value=True)
-        self.output_dir = tk.StringVar()
-        self.backup_time = tk.StringVar()
-        self.retention_days = tk.StringVar()
         self.start_with_windows = tk.BooleanVar()
         self.close_to_tray = tk.BooleanVar()
         self.status_text = tk.StringVar(value="准备就绪")
-        self.next_run_text = tk.StringVar()
         self.connection_hint = tk.StringVar(value="尚未添加备份配置")
 
     def _load_checkbox_images(self) -> None:
         self.checkbox_checked_image: tk.PhotoImage | None = None
         self.checkbox_unchecked_image: tk.PhotoImage | None = None
-        self.checkbox_checked_cell_image: tk.PhotoImage | None = None
-        self.checkbox_unchecked_cell_image: tk.PhotoImage | None = None
         try:
             self.checkbox_checked_image = tk.PhotoImage(
                 file=str(resource_path("checkbox-checked.png"))
@@ -334,23 +237,9 @@ class BackupApp:
             self.checkbox_unchecked_image = tk.PhotoImage(
                 file=str(resource_path("checkbox-unchecked.png"))
             )
-            self.checkbox_checked_cell_image = self._tree_checkbox_image(
-                self.checkbox_checked_image
-            )
-            self.checkbox_unchecked_cell_image = self._tree_checkbox_image(
-                self.checkbox_unchecked_image
-            )
         except tk.TclError:
             self.checkbox_checked_image = None
             self.checkbox_unchecked_image = None
-            self.checkbox_checked_cell_image = None
-            self.checkbox_unchecked_cell_image = None
-
-    @staticmethod
-    def _tree_checkbox_image(image: tk.PhotoImage) -> tk.PhotoImage:
-        padded = tk.PhotoImage(width=image.width() + 10, height=image.height())
-        padded.tk.call(padded.name, "copy", image.name, "-to", 10, 0)
-        return padded
 
     def _create_checkbutton(
         self,
@@ -477,15 +366,13 @@ class BackupApp:
             background=CARD,
             arrowcolor=MUTED,
             bordercolor=BORDER,
+            arrowsize=24,
             padding=5,
         )
         style.map(
             "TCombobox",
             fieldbackground=[("readonly", CARD)],
             foreground=[("readonly", TEXT)],
-            bordercolor=[("focus", ACCENT), ("active", ACCENT)],
-            lightcolor=[("focus", ACCENT), ("active", ACCENT)],
-            darkcolor=[("focus", ACCENT), ("active", ACCENT)],
         )
         style.configure(
             "Primary.TButton",
@@ -589,6 +476,66 @@ class BackupApp:
             lightcolor=[("active", ACCENT)],
             darkcolor=[("active", ACCENT)],
         )
+        for orientation in ("Vertical", "Horizontal"):
+            scrollbar_layout = (
+                [
+                    (
+                        "Vertical.Scrollbar.trough",
+                        {
+                            "sticky": "ns",
+                            "children": [
+                                (
+                                    "Vertical.Scrollbar.thumb",
+                                    {"expand": "1", "sticky": "nswe"},
+                                )
+                            ],
+                        },
+                    )
+                ]
+                if orientation == "Vertical"
+                else [
+                    (
+                        "Horizontal.Scrollbar.trough",
+                        {
+                            "sticky": "we",
+                            "children": [
+                                (
+                                    "Horizontal.Scrollbar.thumb",
+                                    {"expand": "1", "sticky": "nswe"},
+                                )
+                            ],
+                        },
+                    )
+                ]
+            )
+            style.layout(f"{orientation}.TScrollbar", scrollbar_layout)
+            style.configure(
+                f"{orientation}.TScrollbar",
+                width=10,
+                background="#C8C8C8",
+                troughcolor="#FAFAFA",
+                bordercolor="#FAFAFA",
+                lightcolor="#C8C8C8",
+                darkcolor="#C8C8C8",
+                arrowcolor=MUTED,
+                gripcount=0,
+                borderwidth=0,
+            )
+            style.map(
+                f"{orientation}.TScrollbar",
+                background=[
+                    ("active", "#A8A8A8"),
+                    ("pressed", "#8A8A8A"),
+                ],
+                lightcolor=[
+                    ("active", "#A8A8A8"),
+                    ("pressed", "#8A8A8A"),
+                ],
+                darkcolor=[
+                    ("active", "#A8A8A8"),
+                    ("pressed", "#8A8A8A"),
+                ],
+            )
         style.configure(
             "TNotebook",
             background=BG,
@@ -798,7 +745,7 @@ class BackupApp:
             "status": "上次结果",
         }
         widths = {
-            "name": 130,
+            "name": 195,
             "type": 68,
             "source": 220,
             "output": 225,
@@ -821,7 +768,7 @@ class BackupApp:
                     if column in {"name", "source", "output"}
                     else "center"
                 ),
-                stretch=False,
+                stretch=column == "name",
             )
         self.job_tree.grid(row=0, column=0, sticky="nsew")
         y_scroll.config(command=self.job_tree.yview)
@@ -858,32 +805,20 @@ class BackupApp:
 
         actions = tk.Frame(self.task_card, bg=CARD)
         actions.pack(fill="x", pady=(8, 8))
-        for column in range(3):
+        for column in range(2):
             actions.grid_columnconfigure(column, weight=1)
         ttk.Button(
             actions,
-            text="添加 MySQL",
+            text="添加备份任务",
             style="Secondary.TButton",
             command=lambda: self.add_backup_job("mysql"),
-        ).grid(row=0, column=0, sticky="ew", padx=(0, 4), pady=(0, 5))
+        ).grid(row=0, column=0, sticky="ew", padx=(0, 5))
         ttk.Button(
             actions,
-            text="添加 SQLite",
-            style="Secondary.TButton",
-            command=lambda: self.add_backup_job("sqlite"),
-        ).grid(row=0, column=1, sticky="ew", padx=4, pady=(0, 5))
-        ttk.Button(
-            actions,
-            text="添加文件/文件夹",
-            style="Secondary.TButton",
-            command=lambda: self.add_backup_job("files"),
-        ).grid(row=0, column=2, sticky="ew", padx=(4, 0), pady=(0, 5))
-        ttk.Button(
-            actions,
-            text="删除勾选任务",
+            text="删除选中任务",
             style="Secondary.TButton",
             command=self.remove_selected_jobs,
-        ).grid(row=1, column=0, columnspan=3, sticky="ew")
+        ).grid(row=0, column=1, sticky="ew", padx=(5, 0))
 
         settings = tk.Frame(self.task_card, bg=CARD)
         settings.pack(fill="x")
@@ -1114,6 +1049,7 @@ class BackupApp:
         dialog = BackupJobDialog(
             self.root,
             {"job_type": job_type},
+            submit_validator=self._job_name_validation_error,
         )
         self.root.wait_window(dialog)
         if dialog.results:
@@ -1130,31 +1066,34 @@ class BackupApp:
         editable["password"] = unprotect_password(
             str(editable.get("password_enc", ""))
         )
-        dialog = BackupJobDialog(self.root, editable)
+        dialog = BackupJobDialog(
+            self.root,
+            editable,
+            submit_validator=lambda jobs: self._job_name_validation_error(
+                jobs,
+                job_id,
+            ),
+        )
         self.root.wait_window(dialog)
         if dialog.results:
             self._store_backup_jobs(dialog.results, job_id)
 
-    def _store_backup_jobs(
+    def _job_name_validation_error(
         self,
         jobs: list[dict],
         existing_id: str | None = None,
-    ) -> None:
+    ) -> str | None:
+        proposed_names = [str(job.get("name", "")).strip() for job in jobs]
+        if len({name.casefold() for name in proposed_names}) != len(
+            proposed_names
+        ):
+            return "本次添加的备份任务存在重复名称。"
+
         existing_names = {
             str(job.get("name", "")).casefold()
             for job in self.backup_jobs
             if not existing_id or job.get("id") != existing_id
         }
-        proposed_names = [str(job.get("name", "")).strip() for job in jobs]
-        if len({name.casefold() for name in proposed_names}) != len(
-            proposed_names
-        ):
-            messagebox.showerror(
-                "名称重复",
-                "本次添加的备份任务存在重复名称。",
-                parent=self.root,
-            )
-            return
         conflict = next(
             (
                 name
@@ -1164,9 +1103,19 @@ class BackupApp:
             None,
         )
         if conflict:
+            return f"备份任务名称“{conflict}”已存在，请换一个名称。"
+        return None
+
+    def _store_backup_jobs(
+        self,
+        jobs: list[dict],
+        existing_id: str | None = None,
+    ) -> None:
+        validation_error = self._job_name_validation_error(jobs, existing_id)
+        if validation_error:
             messagebox.showerror(
                 "名称重复",
-                f"备份任务名称“{conflict}”已存在，请换一个名称。",
+                validation_error,
                 parent=self.root,
             )
             return
@@ -1367,7 +1316,7 @@ class BackupApp:
                         ),
                     )
                     records.append((job_id, result, None))
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001
                     self.logger.error(
                         "任务失败 %s：%s\n%s",
                         job_name,
@@ -1381,338 +1330,8 @@ class BackupApp:
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _build_connection_card(self) -> None:
-        top = tk.Frame(self.connection_card, bg=CARD)
-        top.pack(fill="x")
-        ttk.Label(top, text="备份内容", style="Section.TLabel").pack(side="left")
-        ttk.Label(
-            top,
-            textvariable=self.connection_hint,
-            style="Muted.TLabel",
-        ).pack(side="right")
 
-        toggles = tk.Frame(self.connection_card, bg=CARD)
-        toggles.pack(fill="x", pady=(12, 10))
-        self._create_checkbutton(
-            toggles,
-            text="数据库备份",
-            variable=self.database_backup_enabled,
-            command=self._update_source_hint,
-        ).pack(side="left", padx=(0, 22))
-        self._create_checkbutton(
-            toggles,
-            text="文件与文件夹备份",
-            variable=self.file_backup_enabled,
-            command=self._update_source_hint,
-        ).pack(side="left")
 
-        self.source_tab_bar = tk.Frame(self.connection_card, bg="#FAFAFA")
-        self.source_tab_bar.pack(anchor="w")
-        self.database_tab_button = PageTab(
-            self.source_tab_bar,
-            text="数据库",
-            icon="▤",
-            command=lambda: self._select_source_page("database"),
-        )
-        self.database_tab_button.pack(side="left")
-        self.file_tab_button = PageTab(
-            self.source_tab_bar,
-            text="文件与文件夹",
-            icon="▦",
-            command=lambda: self._select_source_page("files"),
-        )
-        self.file_tab_button.pack(side="left")
-        self.source_tab_buttons = {
-            "database": self.database_tab_button,
-            "files": self.file_tab_button,
-        }
-        tk.Frame(self.connection_card, bg=BORDER, height=1, width=312).pack(
-            anchor="w"
-        )
-
-        self.source_page_container = tk.Frame(self.connection_card, bg=CARD)
-        self.source_page_container.pack(fill="both", expand=True)
-        self.source_page_container.grid_rowconfigure(0, weight=1)
-        self.source_page_container.grid_columnconfigure(0, weight=1)
-        self.database_tab = tk.Frame(self.source_page_container, bg=CARD)
-        self.file_tab = tk.Frame(self.source_page_container, bg=CARD)
-        self.database_tab.grid(row=0, column=0, sticky="nsew")
-        self.file_tab.grid(row=0, column=0, sticky="nsew")
-        self.database_tab_button.set_active(True)
-
-        database_page = tk.Frame(self.database_tab, bg=CARD)
-        database_page.pack(fill="both", expand=True, padx=10, pady=10)
-        ttk.Label(
-            database_page,
-            text="数据库连接配置",
-            style="Section.TLabel",
-            font=("Microsoft YaHei UI", 10, "bold"),
-        ).pack(anchor="w")
-        ttk.Label(
-            database_page,
-            text="每组配置可使用不同主机、端口和账号，并可同时选择多个数据库。",
-            style="Muted.TLabel",
-        ).pack(anchor="w", pady=(3, 8))
-
-        tree_frame = tk.Frame(
-            database_page,
-            bg=CARD,
-            highlightbackground=BORDER,
-            highlightthickness=1,
-        )
-        tree_frame.pack(fill="both", expand=True)
-        tree_frame.grid_rowconfigure(0, weight=1)
-        tree_frame.grid_columnconfigure(0, weight=1)
-        tree_scroll = ttk.Scrollbar(tree_frame)
-        tree_scroll.grid(row=0, column=1, sticky="ns")
-        self.database_tree = ttk.Treeview(
-            tree_frame,
-            columns=("name", "type", "endpoint", "databases"),
-            show=("tree", "headings"),
-            height=6,
-            selectmode="extended",
-        )
-        self.database_tree.heading(
-            "#0",
-            text="选择",
-            anchor="center",
-            command=self._toggle_all_database_checks,
-        )
-        self.database_tree.column(
-            "#0",
-            width=58,
-            minwidth=58,
-            stretch=False,
-            anchor="center",
-        )
-        self.database_tree.heading("name", text="配置名称")
-        self.database_tree.heading("type", text="类型")
-        self.database_tree.heading("endpoint", text="连接")
-        self.database_tree.heading("databases", text="数据库")
-        self.database_tree.column("name", width=88, minwidth=78, anchor="w")
-        self.database_tree.column("type", width=54, minwidth=50, anchor="center")
-        self.database_tree.column("endpoint", width=112, minwidth=92, anchor="w")
-        self.database_tree.column("databases", width=84, minwidth=70, anchor="w")
-        self.database_tree.grid(row=0, column=0, sticky="nsew")
-        tree_scroll.config(command=self.database_tree.yview)
-        self.database_tree.configure(yscrollcommand=tree_scroll.set)
-        self.database_tree.bind("<Button-1>", self._handle_database_tree_click, add="+")
-        self.database_tree.bind("<Motion>", self._update_database_tree_cursor, add="+")
-        self.database_tree.bind(
-            "<Leave>",
-            lambda _event: self.database_tree.configure(cursor=""),
-            add="+",
-        )
-        self.database_tree.bind("<Double-1>", self._handle_database_tree_double_click)
-
-        database_actions = tk.Frame(database_page, bg=CARD)
-        database_actions.pack(fill="x", pady=(8, 0))
-        database_actions.grid_columnconfigure(0, weight=1)
-        database_actions.grid_columnconfigure(1, weight=1)
-        ttk.Button(
-            database_actions,
-            text="添加 MySQL",
-            style="Secondary.TButton",
-            command=lambda: self.add_database_target("mysql"),
-        ).grid(row=0, column=0, sticky="ew", padx=(0, 4), pady=(0, 5))
-        ttk.Button(
-            database_actions,
-            text="添加 SQLite",
-            style="Secondary.TButton",
-            command=lambda: self.add_database_target("sqlite"),
-        ).grid(row=0, column=1, sticky="ew", padx=(4, 0), pady=(0, 5))
-        ttk.Button(
-            database_actions,
-            text="删除勾选的数据库配置",
-            style="Secondary.TButton",
-            command=self.remove_selected_database_targets,
-        ).grid(row=1, column=0, columnspan=2, sticky="ew")
-
-        file_form = tk.Frame(self.file_tab, bg=CARD)
-        file_form.pack(fill="both", expand=True, padx=10, pady=12)
-        file_form.grid_columnconfigure(1, weight=1)
-
-        self._label(file_form, "备份名称", 0)
-        ttk.Entry(file_form, textvariable=self.file_backup_name).grid(
-            row=0,
-            column=1,
-            sticky="ew",
-            pady=(0, 9),
-        )
-
-        self._label(file_form, "备份来源", 1)
-        source_frame = tk.Frame(
-            file_form,
-            bg=CARD,
-            highlightbackground=BORDER,
-            highlightthickness=1,
-        )
-        source_frame.grid(row=1, column=1, sticky="nsew", pady=(0, 8))
-        source_frame.grid_columnconfigure(0, weight=1)
-        source_scroll = ttk.Scrollbar(source_frame)
-        source_scroll.grid(row=0, column=1, sticky="ns")
-        source_x_scroll = ttk.Scrollbar(
-            source_frame,
-            orient="horizontal",
-        )
-        source_x_scroll.grid(row=1, column=0, sticky="ew")
-        self.file_listbox = tk.Listbox(
-            source_frame,
-            height=5,
-            selectmode=tk.EXTENDED,
-            activestyle="none",
-            bg=CARD,
-            fg=TEXT,
-            selectbackground="#DCE9FF",
-            selectforeground=TEXT,
-            relief="flat",
-            borderwidth=0,
-            font=("Microsoft YaHei UI", 9),
-            yscrollcommand=source_scroll.set,
-            xscrollcommand=source_x_scroll.set,
-        )
-        self.file_listbox.grid(row=0, column=0, sticky="nsew", padx=4, pady=3)
-        source_scroll.config(command=self.file_listbox.yview)
-        source_x_scroll.config(command=self.file_listbox.xview)
-
-        source_actions = tk.Frame(file_form, bg=CARD)
-        source_actions.grid(row=2, column=1, sticky="ew", pady=(0, 8))
-        source_actions.grid_columnconfigure(0, weight=1)
-        source_actions.grid_columnconfigure(1, weight=1)
-        ttk.Button(
-            source_actions,
-            text="添加文件夹",
-            style="Secondary.TButton",
-            command=self.add_file_folders,
-        ).grid(row=0, column=0, sticky="ew", padx=(0, 4), pady=(0, 5))
-        ttk.Button(
-            source_actions,
-            text="添加文件",
-            style="Secondary.TButton",
-            command=self.add_files,
-        ).grid(row=0, column=1, sticky="ew", padx=(4, 0), pady=(0, 5))
-        ttk.Button(
-            source_actions,
-            text="移除选中",
-            style="Secondary.TButton",
-            command=self.remove_selected_files,
-        ).grid(row=1, column=0, sticky="ew", padx=(0, 4))
-        ttk.Button(
-            source_actions,
-            text="清空",
-            style="Secondary.TButton",
-            command=self.clear_file_sources,
-        ).grid(row=1, column=1, sticky="ew", padx=(4, 0))
-
-        self._create_checkbutton(
-            file_form,
-            text="无法读取某个文件时跳过并记录（推荐）",
-            variable=self.file_skip_unreadable,
-        ).grid(row=3, column=1, sticky="w", pady=(0, 7))
-        ttk.Button(
-            file_form,
-            text="检查来源路径",
-            style="Secondary.TButton",
-            command=self.check_file_sources,
-        ).grid(row=4, column=1, sticky="w")
-
-    def _label(self, parent, text, row, rowspan=1):
-        return ttk.Label(parent, text=text, style="Muted.TLabel").grid(
-            row=row,
-            column=0,
-            sticky="w",
-            padx=(0, 14),
-            pady=(0, 9),
-            rowspan=rowspan,
-        )
-
-    def _build_plan_card(self) -> None:
-        ttk.Label(
-            self.plan_card,
-            text="备份计划",
-            style="Section.TLabel",
-        ).pack(anchor="w")
-        form = tk.Frame(self.plan_card, bg=CARD)
-        form.pack(fill="x", pady=(16, 0))
-        form.grid_columnconfigure(1, weight=1)
-
-        self._label(form, "保存目录", 0)
-        out_row = tk.Frame(form, bg=CARD)
-        out_row.grid(row=0, column=1, sticky="ew", pady=(0, 10))
-        out_row.grid_columnconfigure(0, weight=1)
-        ttk.Entry(out_row, textvariable=self.output_dir).grid(
-            row=0, column=0, sticky="ew"
-        )
-        ttk.Button(
-            out_row,
-            text="浏览…",
-            style="Secondary.TButton",
-            command=self.browse_output,
-        ).grid(row=0, column=1, padx=(8, 0))
-
-        self._label(form, "每天备份时间", 1)
-        time_row = tk.Frame(form, bg=CARD)
-        time_row.grid(row=1, column=1, sticky="ew", pady=(0, 10))
-        ttk.Combobox(
-            time_row,
-            textvariable=self.backup_time,
-            values=[
-                f"{hour:02d}:{minute:02d}"
-                for hour in range(24)
-                for minute in (0, 15, 30, 45)
-            ],
-            width=10,
-        ).pack(side="left")
-        ttk.Label(
-            time_row,
-            text="  24 小时制，例如 02:30",
-            style="Muted.TLabel",
-        ).pack(side="left")
-
-        self._label(form, "保留天数", 2)
-        keep_row = tk.Frame(form, bg=CARD)
-        keep_row.grid(row=2, column=1, sticky="ew", pady=(0, 10))
-        ttk.Entry(keep_row, textvariable=self.retention_days, width=10).pack(side="left")
-        ttk.Label(
-            keep_row,
-            text="  0 表示永久保留",
-            style="Muted.TLabel",
-        ).pack(side="left")
-
-        divider = tk.Frame(self.plan_card, bg=BORDER, height=1)
-        divider.pack(fill="x", pady=16)
-        ttk.Label(
-            self.plan_card,
-            text="运行方式",
-            style="Section.TLabel",
-        ).pack(anchor="w")
-        self._create_checkbutton(
-            self.plan_card,
-            text="登录 Windows 后自动启动",
-            variable=self.start_with_windows,
-        ).pack(anchor="w", pady=(12, 8))
-        self._create_checkbutton(
-            self.plan_card,
-            text="关闭窗口时隐藏到系统托盘",
-            variable=self.close_to_tray,
-        ).pack(anchor="w", pady=(0, 14))
-
-        schedule_box = tk.Frame(self.plan_card, bg=ACCENT_SOFT, padx=14, pady=12)
-        schedule_box.pack(fill="x", pady=(3, 0))
-        tk.Label(
-            schedule_box,
-            text="下次自动备份",
-            bg=ACCENT_SOFT,
-            fg=MUTED,
-            font=("Microsoft YaHei UI", 8),
-        ).pack(anchor="w")
-        tk.Label(
-            schedule_box,
-            textvariable=self.next_run_text,
-            bg=ACCENT_SOFT,
-            fg=ACCENT_DARK,
-            font=("Microsoft YaHei UI", 11, "bold"),
-        ).pack(anchor="w", pady=(3, 0))
 
     def _build_log_card(self, parent) -> None:
         top = tk.Frame(parent, bg=CARD)
@@ -1891,357 +1510,30 @@ class BackupApp:
             messagebox.showinfo("已保存", "备份设置已保存并立即生效。", parent=self.root)
         return True
 
-    def get_schedule_time(self) -> dt.time | None:
-        try:
-            return dt.datetime.strptime(self.backup_time.get(), "%H:%M").time()
-        except ValueError:
-            return None
 
-    def _refresh_next_run(self) -> None:
-        if self._next_run_after_id is not None:
-            try:
-                self.root.after_cancel(self._next_run_after_id)
-            except tk.TclError:
-                pass
-            self._next_run_after_id = None
-        schedule = self.get_schedule_time()
-        if schedule is None:
-            self.next_run_text.set("等待有效的时间设置")
-            return
-        now = dt.datetime.now()
-        target = dt.datetime.combine(now.date(), schedule)
-        if target <= now:
-            target += dt.timedelta(days=1)
-        weekdays = "一二三四五六日"
-        self.next_run_text.set(
-            f"{target:%Y-%m-%d}（周{weekdays[target.weekday()]}） {target:%H:%M}"
-        )
-        self._next_run_after_id = self.root.after(60_000, self._refresh_next_run)
 
-    def _select_source_page(self, page_name: str) -> None:
-        page = self.file_tab if page_name == "files" else self.database_tab
-        page.tkraise()
-        for name, button in self.source_tab_buttons.items():
-            button.set_active(name == page_name)
 
-    def _update_source_hint(self) -> None:
-        database_enabled = self.database_backup_enabled.get()
-        file_enabled = self.file_backup_enabled.get()
-        database_count = 0
-        for target in self.database_targets:
-            if target.get("db_type") == "sqlite":
-                database_count += len(target.get("sqlite_paths", []))
-            else:
-                database_count += len(target.get("databases", []))
-        if database_enabled and file_enabled:
-            self.connection_hint.set(
-                f"数据库 {database_count} 个 + 文件 {len(self.file_sources)} 项"
-            )
-        elif file_enabled:
-            self.connection_hint.set(f"已启用文件备份，共 {len(self.file_sources)} 项")
-        elif database_enabled:
-            self.connection_hint.set(
-                f"已启用数据库备份，共 {database_count} 个数据库"
-            )
-        else:
-            self.connection_hint.set("尚未启用任何备份")
 
-    def _refresh_database_targets(self, selected_index: int | None = None) -> None:
-        valid_indexes = set(range(len(self.database_targets)))
-        self.database_target_checked.intersection_update(valid_indexes)
-        if selected_index is not None:
-            self.database_target_checked = {selected_index}
-        for item in self.database_tree.get_children():
-            self.database_tree.delete(item)
-        for index, target in enumerate(self.database_targets):
-            if target.get("db_type") == "sqlite":
-                endpoint = "本地文件"
-                databases = [
-                    Path(path).name
-                    for path in target.get("sqlite_paths", [])
-                ]
-                db_type = "SQLite"
-            else:
-                endpoint = (
-                    f"{target.get('host', '')}:{target.get('port', 3306)}"
-                )
-                databases = list(target.get("databases", []))
-                db_type = "MySQL"
-            database_text = "、".join(str(name) for name in databases)
-            if len(database_text) > 28:
-                database_text = database_text[:27] + "…"
-            self.database_tree.insert(
-                "",
-                "end",
-                iid=str(index),
-                image=self._database_checkbox_image(
-                    index in self.database_target_checked
-                ),
-                text="",
-                values=(
-                    target.get("name", ""),
-                    db_type,
-                    endpoint,
-                    database_text,
-                ),
-            )
-        if selected_index is not None and self.database_tree.exists(
-            str(selected_index)
-        ):
-            self.database_tree.selection_set(str(selected_index))
-            self.database_tree.focus(str(selected_index))
-            self.database_tree.see(str(selected_index))
-        self._update_source_hint()
 
-    def _database_checkbox_image(self, checked: bool) -> tk.PhotoImage | None:
-        return (
-            self.checkbox_checked_cell_image
-            if checked
-            else self.checkbox_unchecked_cell_image
-        )
 
-    def _set_database_checkbox(self, iid: str, checked: bool) -> None:
-        image = self._database_checkbox_image(checked)
-        if image is not None:
-            self.database_tree.item(iid, image=image, text="")
-        else:
-            self.database_tree.item(iid, text="✓" if checked else "□")
 
-    def _handle_database_tree_click(self, event: tk.Event) -> str | None:
-        column = self.database_tree.identify_column(event.x)
-        region = self.database_tree.identify_region(event.x, event.y)
-        if region == "separator" and column in {"#0", "#1"}:
-            return "break"
-        if column != "#0" or region not in {"tree", "cell"}:
-            return None
-        iid = self.database_tree.identify_row(event.y)
-        if not iid:
-            return None
-        index = int(iid)
-        if index in self.database_target_checked:
-            self.database_target_checked.remove(index)
-            checked = False
-        else:
-            self.database_target_checked.add(index)
-            checked = True
-        self._set_database_checkbox(iid, checked)
-        return "break"
 
-    def _update_database_tree_cursor(self, event: tk.Event) -> None:
-        locked = (
-            self.database_tree.identify_region(event.x, event.y) == "separator"
-            and self.database_tree.identify_column(event.x) in {"#0", "#1"}
-        )
-        self.database_tree.configure(cursor="no" if locked else "")
 
-    def _handle_database_tree_double_click(self, event: tk.Event) -> str | None:
-        if self.database_tree.identify_column(event.x) == "#0":
-            return "break"
-        iid = self.database_tree.identify_row(event.y)
-        if iid:
-            self._open_database_target_editor(int(iid))
-        return "break"
 
-    def _toggle_all_database_checks(self) -> None:
-        if len(self.database_target_checked) == len(self.database_targets):
-            self.database_target_checked.clear()
-        else:
-            self.database_target_checked = set(
-                range(len(self.database_targets))
-            )
-        for index in range(len(self.database_targets)):
-            iid = str(index)
-            if self.database_tree.exists(iid):
-                self._set_database_checkbox(
-                    iid,
-                    index in self.database_target_checked,
-                )
 
-    def _target_name_exists(
-        self,
-        name: str,
-        ignore_index: int | None = None,
-    ) -> bool:
-        for index, target in enumerate(self.database_targets):
-            if index == ignore_index:
-                continue
-            if str(target.get("name", "")).strip().casefold() == name.casefold():
-                return True
-        return False
 
-    def _store_database_target(self, target: dict, index: int | None) -> None:
-        name = str(target.get("name", "")).strip()
-        if self._target_name_exists(name, index):
-            messagebox.showerror(
-                "名称重复",
-                f"数据库配置名称“{name}”已存在，请换一个名称。",
-                parent=self.root,
-            )
-            return
-        password = str(target.pop("password", ""))
-        target["password_enc"] = protect_password(password)
-        if index is None:
-            self.database_targets.append(target)
-            selected_index = len(self.database_targets) - 1
-        else:
-            self.database_targets[index] = target
-            selected_index = index
-        self._refresh_database_targets(selected_index)
 
-    def add_database_target(self, db_type: str) -> None:
-        target = {
-            "db_type": "sqlite" if db_type == "sqlite" else "mysql",
-            "port": 3306,
-        }
-        dialog = DatabaseTargetDialog(self.root, target)
-        self.root.wait_window(dialog)
-        if dialog.result is not None:
-            self._store_database_target(dialog.result, None)
 
-    def _open_database_target_editor(self, index: int) -> None:
-        if not 0 <= index < len(self.database_targets):
-            return
-        target = dict(self.database_targets[index])
-        target["password"] = unprotect_password(
-            str(target.get("password_enc", ""))
-        )
-        dialog = DatabaseTargetDialog(self.root, target)
-        self.root.wait_window(dialog)
-        if dialog.result is not None:
-            self._store_database_target(dialog.result, index)
 
-    def remove_selected_database_targets(self) -> None:
-        indexes = sorted(self.database_target_checked, reverse=True)
-        if not indexes:
-            messagebox.showinfo(
-                "未勾选",
-                "请先勾选需要删除的数据库配置。",
-                parent=self.root,
-            )
-            return
-        names = [
-            str(self.database_targets[index].get("name", ""))
-            for index in indexes
-        ]
-        if not messagebox.askyesno(
-            "删除勾选的数据库配置",
-            f"确定删除勾选的 {len(indexes)} 个数据库配置吗？\n\n"
-            + "\n".join(names),
-            parent=self.root,
-        ):
-            return
-        for index in indexes:
-            del self.database_targets[index]
-        self.database_target_checked.clear()
-        self._refresh_database_targets()
 
-    def _refresh_file_sources(self) -> None:
-        self.file_listbox.delete(0, "end")
-        for source in self.file_sources:
-            self.file_listbox.insert("end", source)
-        self._update_source_hint()
 
-    def _add_file_source_paths(self, paths: tuple[str, ...] | list[str]) -> None:
-        existing = {os.path.normcase(item) for item in self.file_sources}
-        for path in paths:
-            text = str(Path(path))
-            key = os.path.normcase(os.path.abspath(text))
-            if key not in existing:
-                self.file_sources.append(text)
-                existing.add(key)
-        self._refresh_file_sources()
 
-    def add_file_folders(self) -> None:
-        path = filedialog.askdirectory(
-            parent=self.root,
-            title="选择需要备份的文件夹",
-        )
-        if path:
-            self._add_file_source_paths([path])
 
-    def add_files(self) -> None:
-        paths = filedialog.askopenfilenames(
-            parent=self.root,
-            title="选择需要备份的文件",
-            filetypes=[("所有文件", "*.*")],
-        )
-        if paths:
-            self._add_file_source_paths(paths)
 
-    def remove_selected_files(self) -> None:
-        selected = sorted(self.file_listbox.curselection(), reverse=True)
-        if not selected:
-            messagebox.showinfo("未选择", "请先选择需要移除的来源。", parent=self.root)
-            return
-        for index in selected:
-            del self.file_sources[index]
-        self._refresh_file_sources()
 
-    def clear_file_sources(self) -> None:
-        if not self.file_sources:
-            return
-        if messagebox.askyesno(
-            "清空来源",
-            "确定清空全部文件备份来源吗？",
-            parent=self.root,
-        ):
-            self.file_sources.clear()
-            self._refresh_file_sources()
 
-    def check_file_sources(self) -> None:
-        try:
-            message = test_file_sources(self.file_sources)
-        except Exception as exc:
-            messagebox.showerror("来源检查失败", str(exc), parent=self.root)
-            return
-        messagebox.showinfo("来源检查通过", message, parent=self.root)
 
-    def browse_output(self) -> None:
-        path = filedialog.askdirectory(
-            parent=self.root,
-            title="选择备份保存目录",
-            initialdir=self.output_dir.get() or str(Path.home()),
-        )
-        if path:
-            self.output_dir.set(path)
 
-    def start_backup(self, auto: bool = False) -> None:
-        if self.backup_running:
-            if not auto:
-                messagebox.showinfo("正在备份", "当前已有备份任务正在执行。", parent=self.root)
-            return
-        config = self._collect_config()
-        if not self._validate(config, show_dialog=not auto):
-            return
-        config["database_targets"] = database_targets_with_passwords(config)
-        if auto:
-            today = dt.date.today().isoformat()
-            self.config["last_auto_attempt_date"] = today
-            self.store.data = self.config
-            try:
-                self.store.save()
-            except OSError as exc:
-                self.logger.warning("记录自动备份日期失败：%s", exc)
-        self.backup_running = True
-        self.status_text.set("自动备份中…" if auto else "正在备份…")
-        self.status_dot.config(fg="#C19C00")
-        self.add_log(("自动任务：" if auto else "手动任务：") + "开始备份。")
-        self.logger.info("%s备份开始", "自动" if auto else "手动")
-
-        def progress(message: str):
-            self.events.put(("progress", message))
-
-        def worker():
-            started = time.monotonic()
-            try:
-                results = run_backup_tasks(config, progress=progress)
-                elapsed = time.monotonic() - started
-                self.events.put(("backup_ok", (elapsed, results)))
-            except Exception as exc:
-                self.logger.error("备份失败：%s\n%s", exc, traceback.format_exc())
-                self.events.put(("backup_error", str(exc)))
-
-        threading.Thread(target=worker, daemon=True).start()
 
     def _poll_events(self) -> None:
         try:
@@ -2252,11 +1544,14 @@ class BackupApp:
                 elif kind == "job_batch_done":
                     records, elapsed, auto = payload
                     self._finish_job_batch(records, float(elapsed), bool(auto))
-                elif kind == "backup_ok":
-                    elapsed, results = payload
-                    self._finish_backup_success(float(elapsed), results)
-                elif kind == "backup_error":
-                    self._finish_backup_error(str(payload))
+                elif kind == "jobs_due":
+                    self.start_jobs_by_id(list(payload), auto=True)
+                elif kind == "show_window":
+                    self.show_window()
+                elif kind == "start_all":
+                    self.start_all_jobs()
+                elif kind == "exit":
+                    self.exit_app()
         except queue.Empty:
             pass
         if self.root.winfo_exists():
@@ -2332,53 +1627,7 @@ class BackupApp:
                 parent=self.root,
             )
 
-    def _finish_backup_success(
-        self,
-        elapsed: float,
-        results: list[BackupResult],
-    ) -> None:
-        self.backup_running = False
-        self.status_text.set(f"备份成功（{len(results)} 项）")
-        self.status_dot.config(fg=SUCCESS)
-        now = dt.datetime.now()
-        paths = [str(result.path) for result in results]
-        self.config.update(
-            {
-                "last_backup_date": now.strftime("%Y-%m-%d %H:%M:%S"),
-                "last_backup_status": "success",
-                "last_backup_file": " | ".join(paths),
-            }
-        )
-        self.store.data = self.config
-        try:
-            self.store.save()
-        except OSError as exc:
-            self.logger.error("保存备份结果失败：%s", exc)
-        for result in results:
-            self.add_log(
-                f"备份成功：{result.path.name}"
-                f"（{result.source_name}，共 {_format_size(result.bytes_written)}）",
-                "success",
-            )
-        self.add_log(f"本次备份用时 {elapsed:.1f} 秒。", "success")
-        self.last_result.config(text=f"上次成功：{now:%Y-%m-%d %H:%M:%S}", fg=SUCCESS)
-        for path in paths:
-            self.logger.info("备份成功：%s", path)
-        self._refresh_next_run()
 
-    def _finish_backup_error(self, message: str) -> None:
-        self.backup_running = False
-        self.status_text.set("备份失败")
-        self.status_dot.config(fg=DANGER)
-        self.config["last_backup_status"] = "error"
-        self.store.data = self.config
-        try:
-            self.store.save()
-        except OSError:
-            pass
-        self.add_log(f"备份失败：{message}", "error")
-        self.last_result.config(text="上次备份失败，请查看运行记录", fg=DANGER)
-        messagebox.showerror("备份失败", message, parent=self.root)
 
     def add_log(self, message: str, tag: str = "") -> None:
         def append():
@@ -2421,19 +1670,17 @@ class BackupApp:
             menu = pystray.Menu(
                 pystray.MenuItem(
                     "打开主界面",
-                    lambda _icon, _item: self.root.after(0, self.show_window),
+                    lambda _icon, _item: self.events.put(("show_window", "")),
                     default=True,
                 ),
                 pystray.MenuItem(
                     "立即备份",
-                    lambda _icon, _item: self.root.after(
-                        0, self.start_all_jobs
-                    ),
+                    lambda _icon, _item: self.events.put(("start_all", "")),
                 ),
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem(
                     "退出程序",
-                    lambda _icon, _item: self.root.after(0, self.exit_app),
+                    lambda _icon, _item: self.events.put(("exit", "")),
                 ),
             )
             self.tray_icon = pystray.Icon(APP_NAME, image, APP_TITLE, menu)
@@ -2442,7 +1689,7 @@ class BackupApp:
                 name="tray-icon",
                 daemon=True,
             ).start()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             self.logger.warning("系统托盘不可用：%s", exc)
             self.tray_icon = None
 
@@ -2474,14 +1721,15 @@ class BackupApp:
         if self.tray_icon is not None:
             try:
                 self.tray_icon.stop()
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001
+                self.logger.warning("停止系统托盘失败：%s", exc)
         self.root.quit()
         self.root.destroy()
 
 
 def self_test() -> int:
-    temp_dir = Path(tempfile.mkdtemp(prefix="dbbap_test_"))
+    temp_context = tempfile.TemporaryDirectory(prefix="dbbap_test_")
+    temp_dir = Path(temp_context.name)
     db_path = temp_dir / "sample.sqlite"
     db_path_2 = temp_dir / "sample_2.sqlite"
     source = sqlite3.connect(db_path)
@@ -2621,7 +1869,7 @@ def backup_once() -> int:
                         "%Y-%m-%d %H:%M:%S"
                     )
                     break
-        except Exception:
+        except Exception:  # noqa: BLE001
             failed += 1
             logger.error(
                 "命令行任务失败：%s\n%s",
@@ -2643,13 +1891,13 @@ def main() -> int:
     if args.self_test:
         try:
             return self_test()
-        except Exception:
+        except Exception:  # noqa: BLE001
             configure_logging().error("自检失败：%s", traceback.format_exc())
             return 1
     if args.backup_once:
         return backup_once()
 
-    acquired, mutex = acquire_single_instance()
+    acquired, _mutex_handle = acquire_single_instance()
     if not acquired:
         ctypes.windll.user32.MessageBoxW(
             None,

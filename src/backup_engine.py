@@ -6,13 +6,13 @@ import os
 import re
 import sqlite3
 import zipfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
-from typing import Callable
-
 
 ProgressCallback = Callable[[str], None]
+BACKUP_REPORT_NAME = "备份说明.txt"
 
 
 class BackupError(RuntimeError):
@@ -227,8 +227,13 @@ def _is_reparse_point(path: Path) -> bool:
         return True
 
 
-def _unique_archive_roots(sources: list[Path]) -> list[tuple[Path, str]]:
-    used: set[str] = set()
+def _unique_archive_roots(
+    sources: list[Path],
+    reserved_names: set[str] | None = None,
+) -> list[tuple[Path, str]]:
+    used = {
+        name.casefold() for name in (reserved_names or set())
+    }
     result: list[tuple[Path, str]] = []
     for source in sources:
         base = source.name or source.drive.replace(":", "") or "root"
@@ -282,7 +287,10 @@ def backup_files(
     final_path = _unique_archive_path(output_dir, stem)
     temp_path = output_dir / f".{stem}.zip.part"
 
-    sources_with_roots = _unique_archive_roots(sources)
+    sources_with_roots = _unique_archive_roots(
+        sources,
+        {BACKUP_REPORT_NAME},
+    )
     skipped: list[str] = []
     file_count = 0
     completed = False
@@ -297,7 +305,7 @@ def backup_files(
             allowZip64=True,
         ) as archive:
             archive.comment = (
-                f"DBA_JOB_ID={config.get('backup_job_id', '')}".encode("utf-8")
+                f"DBA_JOB_ID={config.get('backup_job_id', '')}".encode()
             )
             for source, root_name in sources_with_roots:
                 if source.is_file():
@@ -308,6 +316,7 @@ def backup_files(
                         if not skip_unreadable:
                             raise BackupError(f"无法读取文件：{source}（{exc}）") from exc
                         skipped.append(str(source))
+                        file_count -= 1
                     continue
 
                 if not source.is_dir():
@@ -317,13 +326,18 @@ def backup_files(
                     continue
 
                 archive.writestr(root_name + "/", b"")
-                walk_error: list[OSError] = []
 
-                def on_walk_error(exc: OSError) -> None:
+                def on_walk_error(
+                    exc: OSError,
+                    source_root: Path = source,
+                ) -> None:
                     if skip_unreadable:
                         skipped.append(str(exc))
                     else:
-                        walk_error.append(exc)
+                        raise BackupError(
+                            f"无法读取文件夹："
+                            f"{exc.filename or source_root}（{exc}）"
+                        ) from exc
 
                 for current, dirnames, filenames in os.walk(
                     source,
@@ -331,11 +345,6 @@ def backup_files(
                     onerror=on_walk_error,
                     followlinks=False,
                 ):
-                    if walk_error:
-                        raise BackupError(
-                            f"无法读取文件夹：{current}（{walk_error[0]}）"
-                        ) from walk_error[0]
-
                     current_path = Path(current)
                     allowed_dirs = []
                     for dirname in sorted(dirnames):
@@ -383,7 +392,7 @@ def backup_files(
             if skipped:
                 report_lines.extend(["", "跳过项:", *skipped])
             archive.writestr(
-                "备份说明.txt",
+                BACKUP_REPORT_NAME,
                 "\r\n".join(report_lines) + "\r\n",
             )
 
@@ -630,7 +639,7 @@ def backup_mysql(
     finally:
         try:
             connection.close()
-        except Exception:
+        except Exception:  # noqa: BLE001, S110
             pass
         if completed and temp_path.exists():
             try:
@@ -754,7 +763,6 @@ def _zip_database_result(
     output_dir: Path,
     job_name: str,
     source_name: str,
-    job_type: str,
     detail_label: str,
     detail_value: str,
     archive_entry_name: str | None = None,
@@ -779,7 +787,7 @@ def _zip_database_result(
             compresslevel=6,
             allowZip64=True,
         ) as archive:
-            archive.comment = f"DBA_JOB_ID={job_id}".encode("utf-8")
+            archive.comment = f"DBA_JOB_ID={job_id}".encode()
             archive.write(
                 raw_result.path,
                 arcname=archive_entry_name or raw_result.path.name,
@@ -790,7 +798,7 @@ def _zip_database_result(
                 f"备份时间: {started_at:%Y-%m-%d %H:%M:%S}\r\n"
                 f"{detail_label}: {detail_value}\r\n"
             )
-            archive.writestr("备份说明.txt", report)
+            archive.writestr(BACKUP_REPORT_NAME, report)
         os.replace(temp_path, final_path)
         with zipfile.ZipFile(final_path, mode="r", allowZip64=True) as archive:
             bad_entry = archive.testzip()
@@ -845,7 +853,6 @@ def run_backup_job(
             output_dir,
             job_name,
             database,
-            "MySQL",
             "备份内容",
             sql_file_name,
             sql_file_name,
@@ -869,7 +876,6 @@ def run_backup_job(
             output_dir,
             job_name,
             source_path.name,
-            "SQLite",
             "原文件路径",
             sqlite_path,
             source_path.name,
@@ -903,142 +909,3 @@ def run_backup_job(
         job_id=str(job.get("id", "")),
     )
     return result
-
-
-def _database_targets(config: dict) -> list[dict]:
-    if "database_targets" in config:
-        targets = config.get("database_targets")
-        if not isinstance(targets, list):
-            raise BackupError("数据库连接配置格式无效。")
-        return [dict(target) for target in targets if isinstance(target, dict)]
-
-    db_type = str(config.get("db_type", "mysql")).lower()
-    if db_type == "mysql" and str(config.get("mysql_database", "")).strip():
-        return [
-            {
-                "name": "",
-                "db_type": "mysql",
-                "host": config.get("mysql_host", "127.0.0.1"),
-                "port": config.get("mysql_port", 3306),
-                "user": config.get("mysql_user", "root"),
-                "password": config.get("mysql_password", ""),
-                "databases": [config.get("mysql_database")],
-            }
-        ]
-    if db_type == "sqlite" and str(config.get("sqlite_path", "")).strip():
-        return [
-            {
-                "name": "",
-                "db_type": "sqlite",
-                "sqlite_paths": [config.get("sqlite_path")],
-            }
-        ]
-    return []
-
-
-def run_backup_tasks(
-    config: dict,
-    progress: ProgressCallback | None = None,
-) -> list[BackupResult]:
-    output_value = str(config.get("output_dir", "")).strip()
-    if not output_value:
-        raise BackupError("请选择备份文件保存目录。")
-    output_dir = Path(output_value).expanduser()
-
-    database_enabled = bool(config.get("database_backup_enabled", True))
-    file_enabled = bool(config.get("file_backup_enabled", False))
-    if not database_enabled and not file_enabled:
-        raise BackupError("请至少启用数据库备份或文件备份中的一种。")
-
-    results: list[BackupResult] = []
-    errors: list[str] = []
-    if database_enabled:
-        targets = _database_targets(config)
-        if not targets:
-            raise BackupError("请至少添加一个数据库备份配置。")
-        for target_index, target in enumerate(targets, start=1):
-            target_name = str(target.get("name", "")).strip()
-            db_type = str(target.get("db_type", "mysql")).lower()
-            label = target_name or f"数据库配置 {target_index}"
-            try:
-                if db_type == "mysql":
-                    databases = target.get("databases", [])
-                    if isinstance(databases, str):
-                        databases = [databases]
-                    databases = [str(name).strip() for name in databases if str(name).strip()]
-                    if not databases:
-                        raise BackupError(f"{label} 尚未选择数据库。")
-                    for database in databases:
-                        task_config = dict(config)
-                        task_config.update(
-                            {
-                                "mysql_host": target.get("host", "127.0.0.1"),
-                                "mysql_port": target.get("port", 3306),
-                                "mysql_user": target.get("user", "root"),
-                                "mysql_password": target.get("password", ""),
-                                "mysql_database": database,
-                                "backup_target_name": target_name,
-                            }
-                        )
-                        if progress:
-                            progress(f"正在备份数据库：{label} / {database}")
-                        results.append(
-                            backup_mysql(task_config, output_dir, progress)
-                        )
-                elif db_type == "sqlite":
-                    paths = target.get("sqlite_paths", [])
-                    if isinstance(paths, str):
-                        paths = [paths]
-                    paths = [str(path).strip() for path in paths if str(path).strip()]
-                    if not paths:
-                        raise BackupError(f"{label} 尚未选择 SQLite 文件。")
-                    for sqlite_path in paths:
-                        task_config = dict(config)
-                        task_config.update(
-                            {
-                                "sqlite_path": sqlite_path,
-                                "backup_target_name": target_name,
-                            }
-                        )
-                        if progress:
-                            progress(
-                                f"正在备份 SQLite：{label} / {Path(sqlite_path).name}"
-                            )
-                        results.append(
-                            backup_sqlite(task_config, output_dir, progress)
-                        )
-                else:
-                    raise BackupError(f"不支持的数据库类型：{db_type}")
-            except Exception as exc:
-                message = f"{label}：{exc}"
-                errors.append(message)
-                if progress:
-                    progress(f"备份失败：{message}")
-    if file_enabled:
-        try:
-            results.append(backup_files(config, output_dir, progress))
-        except Exception as exc:
-            errors.append(f"文件备份：{exc}")
-            if progress:
-                progress(f"备份失败：文件备份：{exc}")
-
-    try:
-        days = int(config.get("retention_days", 30))
-    except (TypeError, ValueError):
-        days = 30
-    for result in results:
-        apply_retention(output_dir, result.source_name, days)
-    if errors:
-        raise BackupError("部分备份任务失败：\n" + "\n".join(errors))
-    return results
-
-
-def run_backup(
-    config: dict,
-    progress: ProgressCallback | None = None,
-) -> BackupResult:
-    results = run_backup_tasks(config, progress)
-    if len(results) != 1:
-        raise BackupError("当前配置包含多个备份任务，请使用 run_backup_tasks。")
-    return results[0]
-

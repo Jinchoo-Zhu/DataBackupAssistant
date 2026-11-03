@@ -1,12 +1,11 @@
 from __future__ import annotations
 
+import ctypes
 import os
 import sys
-import ctypes
 from ctypes import wintypes
 from pathlib import Path
 from typing import Any
-
 
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 RUN_VALUE_NAME = "DataBackupAssistant"
@@ -70,19 +69,6 @@ def executable_command() -> str:
     if not getattr(sys, "frozen", False):
         command += f' "{Path(sys.argv[0]).resolve()}"'
     return command + " --minimized"
-
-
-def is_autostart_enabled() -> bool:
-    if os.name != "nt":
-        return False
-    import winreg
-
-    try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as key:
-            winreg.QueryValueEx(key, RUN_VALUE_NAME)
-            return True
-    except FileNotFoundError:
-        return False
 
 
 def set_autostart(enabled: bool) -> None:

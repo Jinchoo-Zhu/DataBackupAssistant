@@ -10,7 +10,6 @@ from ctypes import wintypes
 from pathlib import Path
 from typing import Any
 
-
 APP_NAME = "DataBackupAssistant"
 APP_DISPLAY_NAME = "数据自动备份助手"
 APP_VERSION = "1.0.0"
@@ -118,7 +117,7 @@ def unprotect_password(value: str) -> str:
     try:
         encrypted = base64.b64decode(value.encode("ascii"))
         return _dpapi_transform(encrypted, protect=False).decode("utf-8")
-    except Exception:
+    except Exception:  # noqa: BLE001
         return ""
 
 
@@ -142,23 +141,39 @@ class ConfigStore:
             except (OSError, ValueError):
                 loaded = {}
         self.data = {**DEFAULT_CONFIG, **loaded}
-        self.data["database_targets"] = list(
-            self.data.get("database_targets") or []
-        )
-        self.data["backup_jobs"] = list(self.data.get("backup_jobs") or [])
+        raw_targets = self.data.get("database_targets") or []
+        self.data["database_targets"] = [
+            dict(target)
+            for target in raw_targets
+            if isinstance(target, dict)
+        ] if isinstance(raw_targets, list) else []
+        raw_jobs = self.data.get("backup_jobs") or []
+        self.data["backup_jobs"] = [
+            dict(job) for job in raw_jobs if isinstance(job, dict)
+        ] if isinstance(raw_jobs, list) else []
         if "database_targets" not in loaded:
             legacy_target = self._legacy_database_target()
             if legacy_target is not None:
                 self.data["database_targets"] = [legacy_target]
         if "backup_jobs" not in loaded:
             self.data["backup_jobs"] = self._legacy_backup_jobs()
+        seen_ids: set[str] = set()
+        for job in self.data["backup_jobs"]:
+            job_id = str(job.get("id", "")).strip()
+            if not job_id or job_id in seen_ids:
+                job_id = uuid.uuid4().hex
+                job["id"] = job_id
+            seen_ids.add(job_id)
         return self.data
 
     def _legacy_database_target(self) -> dict[str, Any] | None:
         db_type = str(self.data.get("db_type", "mysql")).lower()
         if db_type == "mysql" and str(self.data.get("mysql_database", "")).strip():
             host = str(self.data.get("mysql_host", "127.0.0.1")).strip()
-            port = int(self.data.get("mysql_port", 3306))
+            try:
+                port = int(self.data.get("mysql_port", 3306))
+            except (TypeError, ValueError):
+                port = 3306
             return {
                 "name": f"MySQL {host}:{port}",
                 "db_type": "mysql",
@@ -197,7 +212,12 @@ class ConfigStore:
         for target in self.data.get("database_targets", []):
             target_name = str(target.get("name", "")).strip() or "数据库"
             if target.get("db_type") == "sqlite":
-                for path in target.get("sqlite_paths", []):
+                sqlite_paths = target.get("sqlite_paths", [])
+                if isinstance(sqlite_paths, str):
+                    sqlite_paths = [sqlite_paths]
+                if not isinstance(sqlite_paths, list):
+                    sqlite_paths = []
+                for path in sqlite_paths:
                     jobs.append(
                         {
                             "id": uuid.uuid4().hex,
@@ -216,7 +236,12 @@ class ConfigStore:
                         }
                     )
             else:
-                for database in target.get("databases", []):
+                databases = target.get("databases", [])
+                if isinstance(databases, str):
+                    databases = [databases]
+                if not isinstance(databases, list):
+                    databases = []
+                for database in databases:
                     jobs.append(
                         {
                             "id": uuid.uuid4().hex,
@@ -227,7 +252,7 @@ class ConfigStore:
                             "host": str(
                                 target.get("host", "127.0.0.1")
                             ),
-                            "port": int(target.get("port", 3306)),
+                            "port": _safe_port(target.get("port", 3306)),
                             "user": str(target.get("user", "root")),
                             "password_enc": str(
                                 target.get("password_enc", "")
@@ -247,7 +272,12 @@ class ConfigStore:
             file_name = str(
                 self.data.get("file_backup_name", "文件备份")
             ).strip()
-            for source in self.data.get("file_sources", []):
+            file_sources = self.data.get("file_sources", [])
+            if isinstance(file_sources, str):
+                file_sources = [file_sources]
+            if not isinstance(file_sources, list):
+                file_sources = []
+            for source in file_sources:
                 jobs.append(
                     {
                         "id": uuid.uuid4().hex,
@@ -279,31 +309,22 @@ class ConfigStore:
         )
         os.replace(temp_path, self.path)
 
-    def get_password(self) -> str:
-        return unprotect_password(str(self.data.get("mysql_password_enc", "")))
-
-    def set_password(self, password: str) -> None:
-        self.data["mysql_password_enc"] = protect_password(password)
-
-
-def database_targets_with_passwords(config: dict[str, Any]) -> list[dict[str, Any]]:
-    hydrated: list[dict[str, Any]] = []
-    for raw_target in config.get("database_targets", []):
-        target = dict(raw_target)
-        target["password"] = unprotect_password(
-            str(target.get("password_enc", ""))
-        )
-        hydrated.append(target)
-    return hydrated
-
-
 def backup_jobs_with_passwords(config: dict[str, Any]) -> list[dict[str, Any]]:
     hydrated: list[dict[str, Any]] = []
     for raw_job in config.get("backup_jobs", []):
+        if not isinstance(raw_job, dict):
+            continue
         job = dict(raw_job)
         job["password"] = unprotect_password(
             str(job.get("password_enc", ""))
         )
         hydrated.append(job)
     return hydrated
+
+
+def _safe_port(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 3306
 

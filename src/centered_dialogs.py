@@ -5,7 +5,6 @@ from tkinter import ttk
 
 from windows_integration import center_window_over_parent
 
-
 BG = "#F7F8FA"
 PANEL = "#FFFFFF"
 BORDER = "#D0D0D0"
