@@ -13,7 +13,7 @@ from typing import Any
 APP_NAME = "DataBackupAssistant"
 APP_DISPLAY_NAME = "数据自动备份助手"
 APP_VERSION = "1.0.0"
-APP_AUTHOR = "Jinchoo（朱锦春）"
+APP_AUTHOR = "Jinchoo"
 LEGACY_APP_NAME = "DatabaseBackupAssistant"
 
 
