@@ -15,7 +15,7 @@
 ## 界面预览
 
 <p align="center">
-  <img src="docs/app-preview.png" alt="数据自动备份助手主界面" width="920">
+  <img src="docs/main-window.png" alt="数据自动备份助手主界面" width="920">
 </p>
 
 <p align="center"><sub>主界面：统一管理数据库、SQLite、文件和文件夹备份任务</sub></p>
