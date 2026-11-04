@@ -45,6 +45,8 @@ class BackupEngineTests(unittest.TestCase):
             result.path.name,
             r"^【\d{14}】 文件夹备份 - 工程资料\.zip$",
         )
+        self.assertRegex(result.path.parent.name, r"^\d{8}备份$")
+        self.assertEqual(result.path.parent.parent, self.temp_dir / "output")
         with zipfile.ZipFile(result.path) as archive:
             self.assertIn("工程资料/readme.txt", archive.namelist())
             self.assertIn("备份说明.txt", archive.namelist())
@@ -70,6 +72,10 @@ class BackupEngineTests(unittest.TestCase):
         )
         self.assertTrue(second.path.stem.endswith("_2"))
         self.assertTrue(third.path.stem.endswith("_3"))
+        self.assertEqual(
+            {first.path.parent, second.path.parent, third.path.parent},
+            {first.path.parent},
+        )
 
     def test_source_named_like_report_does_not_overwrite_report(self) -> None:
         source = self.temp_dir / "备份说明.txt"
@@ -197,6 +203,52 @@ class BackupEngineTests(unittest.TestCase):
         self.assertEqual(removed, 1)
         self.assertFalse(first.exists())
         self.assertTrue(second.exists())
+
+    def test_retention_scans_date_folders_and_removes_empty_folder(self) -> None:
+        output = self.temp_dir / "output"
+        dated_output = output / "20260101备份"
+        dated_output.mkdir(parents=True)
+        backup = dated_output / "【20260101010101】 任务 - a.zip"
+        with zipfile.ZipFile(backup, "w") as archive:
+            archive.comment = b"DBA_JOB_ID=job-a"
+            archive.writestr("备份说明.txt", "test")
+        old_time = time.time() - 5 * 86400
+        os.utime(backup, (old_time, old_time))
+
+        removed = backup_engine.apply_retention(
+            output,
+            "任务",
+            1,
+            "job-a",
+        )
+        self.assertEqual(removed, 1)
+        self.assertFalse(backup.exists())
+        self.assertFalse(dated_output.exists())
+
+    def test_file_source_does_not_include_other_date_folders(self) -> None:
+        source = self.temp_dir / "source"
+        source.mkdir()
+        (source / "data.txt").write_text("content", encoding="utf-8")
+        output_root = source / "backups"
+        old_folder = output_root / "20250101备份"
+        old_folder.mkdir(parents=True)
+        (old_folder / "old.zip").write_bytes(b"old")
+
+        result = backup_engine.run_backup_job(
+            {
+                "id": "file-job",
+                "name": "文件夹备份",
+                "job_type": "files",
+                "file_source": str(source),
+                "file_skip_unreadable": True,
+                "output_dir": str(output_root),
+                "retention_days": 0,
+            }
+        )
+        with zipfile.ZipFile(result.path) as archive:
+            self.assertFalse(
+                any(name.startswith("backups/") for name in archive.namelist())
+            )
 
 
 class ConfigurationAndSchedulingTests(unittest.TestCase):

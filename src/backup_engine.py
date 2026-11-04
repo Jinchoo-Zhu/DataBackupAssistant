@@ -13,6 +13,7 @@ from pathlib import Path
 
 ProgressCallback = Callable[[str], None]
 BACKUP_REPORT_NAME = "备份说明.txt"
+DATE_FOLDER_PATTERN = re.compile(r"^\d{8}备份$")
 
 
 class BackupError(RuntimeError):
@@ -67,6 +68,14 @@ def _unique_archive_path(output_dir: Path, stem: str) -> Path:
         candidate = output_dir / f"{stem}_{suffix}.zip"
         suffix += 1
     return candidate
+
+
+def dated_backup_dir(
+    output_root: Path,
+    at: dt.datetime | None = None,
+) -> Path:
+    date_value = at or dt.datetime.now()
+    return output_root / f"{date_value:%Y%m%d}备份"
 
 
 def _quote_identifier(value: str) -> str:
@@ -262,12 +271,16 @@ def backup_files(
         raise BackupError("以下备份来源不存在：\n" + "\n".join(missing))
 
     resolved_output = output_dir.resolve()
+    output_root_value = str(config.get("file_output_root", "")).strip()
+    resolved_output_root = (
+        Path(output_root_value).expanduser().resolve()
+        if output_root_value
+        else resolved_output
+    )
     for source in sources:
-        if source.is_dir() and _is_within(resolved_output, source) and (
-            resolved_output == source.resolve()
-        ):
+        if source.is_dir() and resolved_output_root == source.resolve():
             raise BackupError(
-                f"备份保存目录不能与来源文件夹相同：{source}"
+                f"备份保存根目录不能与来源文件夹相同：{source}"
             )
 
     backup_name = str(config.get("file_backup_name", "")).strip() or "文件备份"
@@ -352,7 +365,7 @@ def backup_files(
                         if _is_reparse_point(directory):
                             skipped.append(str(directory))
                             continue
-                        if _is_within(directory, resolved_output):
+                        if _is_within(directory, resolved_output_root):
                             continue
                         allowed_dirs.append(dirname)
                         relative = directory.relative_to(source)
@@ -367,7 +380,7 @@ def backup_files(
                         if _is_reparse_point(file_path):
                             skipped.append(str(file_path))
                             continue
-                        if _is_within(file_path, resolved_output):
+                        if _is_within(file_path, resolved_output_root):
                             continue
                         relative = file_path.relative_to(source)
                         archive_name = (Path(root_name) / relative).as_posix()
@@ -725,27 +738,51 @@ def apply_retention(
         re.IGNORECASE,
     )
     removed = 0
-    for path in output_dir.iterdir():
-        if not path.is_file():
-            continue
-        is_legacy = bool(backup_pattern.fullmatch(path.name))
-        is_timestamped = bool(timestamp_pattern.fullmatch(path.name))
-        if not is_legacy and not is_timestamped:
-            continue
-        if is_timestamped and job_id:
-            try:
-                with zipfile.ZipFile(path, mode="r") as archive:
-                    owner = archive.comment.decode("utf-8", errors="replace")
-                if owner != f"DBA_JOB_ID={job_id}":
-                    continue
-            except (OSError, zipfile.BadZipFile):
-                continue
+    storage_dirs = [output_dir]
+    try:
+        storage_dirs.extend(
+            path
+            for path in output_dir.iterdir()
+            if path.is_dir()
+            and DATE_FOLDER_PATTERN.fullmatch(path.name)
+        )
+    except OSError:
+        return 0
+
+    for storage_dir in storage_dirs:
         try:
-            if path.stat().st_mtime < cutoff:
-                path.unlink()
-                removed += 1
+            entries = list(storage_dir.iterdir())
         except OSError:
             continue
+        for path in entries:
+            if not path.is_file():
+                continue
+            is_legacy = bool(backup_pattern.fullmatch(path.name))
+            is_timestamped = bool(timestamp_pattern.fullmatch(path.name))
+            if not is_legacy and not is_timestamped:
+                continue
+            if is_timestamped and job_id:
+                try:
+                    with zipfile.ZipFile(path, mode="r") as archive:
+                        owner = archive.comment.decode(
+                            "utf-8",
+                            errors="replace",
+                        )
+                    if owner != f"DBA_JOB_ID={job_id}":
+                        continue
+                except (OSError, zipfile.BadZipFile):
+                    continue
+            try:
+                if path.stat().st_mtime < cutoff:
+                    path.unlink()
+                    removed += 1
+            except OSError:
+                continue
+        if storage_dir != output_dir:
+            try:
+                storage_dir.rmdir()
+            except OSError:
+                pass
     return removed
 
 
@@ -821,8 +858,10 @@ def run_backup_job(
 ) -> BackupResult:
     output_value = str(job.get("output_dir", "")).strip()
     if not output_value:
-        raise BackupError(f"{job.get('name', '备份任务')} 未设置保存目录。")
-    output_dir = Path(output_value).expanduser()
+        raise BackupError(f"{job.get('name', '备份任务')} 未设置保存根目录。")
+    output_root = Path(output_value).expanduser()
+    output_root.mkdir(parents=True, exist_ok=True)
+    output_dir = dated_backup_dir(output_root)
     output_dir.mkdir(parents=True, exist_ok=True)
     job_name = str(job.get("name", "")).strip() or "备份任务"
     job_type = str(job.get("job_type", "")).lower()
@@ -891,6 +930,7 @@ def run_backup_job(
                     job.get("file_skip_unreadable", True)
                 ),
                 "backup_job_id": str(job.get("id", "")),
+                "file_output_root": str(output_root),
             },
             output_dir,
             progress,
@@ -903,7 +943,7 @@ def run_backup_job(
     except (TypeError, ValueError):
         retention_days = 30
     apply_retention(
-        output_dir,
+        output_root,
         job_name,
         retention_days,
         job_id=str(job.get("id", "")),

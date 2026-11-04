@@ -330,7 +330,7 @@ class BackupJobDialog(tk.Toplevel):
         ).pack(anchor="w")
         tk.Label(
             header,
-            text="每个任务独立选择来源、保存目录、执行时间和保留天数。",
+            text="每个任务独立选择来源、保存根目录、执行时间和保留天数。",
             bg=PANEL,
             fg=MUTED,
             font=("Microsoft YaHei UI", 9),
@@ -408,7 +408,7 @@ class BackupJobDialog(tk.Toplevel):
             pady=(10, 0),
         )
         plan.grid_columnconfigure(1, weight=1)
-        self._label(plan, "保存目录", 0, row_pady=(6, 6))
+        self._label(plan, "保存根目录", 0, row_pady=(6, 6))
         output_row = tk.Frame(plan, bg=PANEL_ALT)
         output_row.grid(row=0, column=1, sticky="ew", pady=(6, 6), padx=(0, 8))
         output_row.grid_columnconfigure(0, weight=1)
@@ -1019,7 +1019,7 @@ class BackupJobDialog(tk.Toplevel):
     def _browse_output(self) -> None:
         path = filedialog.askdirectory(
             parent=self,
-            title="选择该任务的备份保存目录",
+            title="选择该任务的备份保存根目录",
             initialdir=self.output_dir_var.get() or str(Path.home()),
         )
         if path:
@@ -1046,7 +1046,7 @@ class BackupJobDialog(tk.Toplevel):
             self._show_save_error("设置有误", "请填写任务名称。")
             return
         if not output_dir:
-            self._show_save_error("设置有误", "请选择该任务的保存目录。")
+            self._show_save_error("设置有误", "请选择该任务的保存根目录。")
             return
         try:
             parsed_time = dt.datetime.strptime(self.backup_time_var.get(), "%H:%M")

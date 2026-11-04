@@ -699,7 +699,7 @@ class BackupApp:
 
         ttk.Label(
             self.task_card,
-            text="每个数据库、SQLite 文件、文件或文件夹都是独立任务，可分别设置保存目录、执行时间和保留天数。",
+            text="每个数据库、SQLite 文件、文件或文件夹都是独立任务，可分别设置保存根目录、执行时间和保留天数。",
             style="Muted.TLabel",
         ).pack(anchor="w", pady=(4, 10))
 
@@ -739,7 +739,7 @@ class BackupApp:
             "name": "任务名称",
             "type": "类型",
             "source": "备份来源",
-            "output": "保存目录",
+            "output": "保存根目录",
             "time": "执行时间",
             "keep": "保留",
             "status": "上次结果",
@@ -1458,7 +1458,7 @@ class BackupApp:
                     raise ValueError(f"任务名称重复：{name}")
                 names.add(name.casefold())
                 if not str(job.get("output_dir", "")).strip():
-                    raise ValueError(f"{name} 未设置保存目录。")
+                    raise ValueError(f"{name} 未设置保存根目录。")
                 try:
                     dt.datetime.strptime(str(job.get("backup_time", "")), "%H:%M")
                 except ValueError as exc:
