@@ -4,7 +4,7 @@ import base64
 import ctypes
 import json
 import os
-import shutil
+import sys
 import uuid
 from ctypes import wintypes
 from pathlib import Path
@@ -14,25 +14,17 @@ APP_NAME = "DataBackupAssistant"
 APP_DISPLAY_NAME = "数据自动备份助手"
 APP_VERSION = "1.0.0"
 APP_AUTHOR = "Jinchoo"
-LEGACY_APP_NAME = "DatabaseBackupAssistant"
 
 
-def app_data_dir() -> Path:
-    base = os.environ.get("APPDATA")
-    if base:
-        return Path(base) / APP_NAME
-    return Path.home() / f".{APP_NAME}"
+def application_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent
 
 
-def legacy_app_data_dir() -> Path:
-    base = os.environ.get("APPDATA")
-    if base:
-        return Path(base) / LEGACY_APP_NAME
-    return Path.home() / f".{LEGACY_APP_NAME}"
-
-
-CONFIG_PATH = app_data_dir() / "config.json"
-LOG_DIR = app_data_dir() / "logs"
+DATA_DIR = application_dir() / "config"
+CONFIG_PATH = DATA_DIR / "config.json"
+LOG_DIR = DATA_DIR / "logs"
 
 
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -128,16 +120,11 @@ class ConfigStore:
 
     def load(self) -> dict[str, Any]:
         loaded: dict[str, Any] = {}
-        legacy_config = legacy_app_data_dir() / "config.json"
-        if not self.path.exists() and legacy_config.is_file():
-            try:
-                self.path.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(legacy_config, self.path)
-            except OSError:
-                pass
         if self.path.exists():
             try:
-                loaded = json.loads(self.path.read_text(encoding="utf-8"))
+                raw = json.loads(self.path.read_text(encoding="utf-8"))
+                if isinstance(raw, dict):
+                    loaded = raw
             except (OSError, ValueError):
                 loaded = {}
         self.data = {**DEFAULT_CONFIG, **loaded}

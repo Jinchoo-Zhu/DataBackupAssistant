@@ -769,7 +769,7 @@ class BackupApp:
                     if column in {"name", "source", "output"}
                     else "center"
                 ),
-                stretch=column == "name",
+                stretch=False,
             )
         self.job_tree.grid(row=0, column=0, sticky="nsew")
         y_scroll.config(command=self.job_tree.yview)
@@ -1910,9 +1910,21 @@ def main() -> int:
         )
         return 0
 
-    root = tk.Tk()
-    BackupApp(root, minimized=args.minimized)
-    root.mainloop()
+    try:
+        root = tk.Tk()
+        BackupApp(root, minimized=args.minimized)
+        root.mainloop()
+    except OSError as exc:
+        message = (
+            "无法创建或读取程序目录下的 config 文件夹。\n"
+            f"{exc}\n\n"
+            "请将程序放到有写入权限的目录后重试。"
+        )
+        if os.name == "nt":
+            ctypes.windll.user32.MessageBoxW(None, message, APP_TITLE, 0x10)
+        else:
+            print(message)
+        return 1
     return 0
 
 

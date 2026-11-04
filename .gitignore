@@ -10,3 +10,5 @@ dist/
 outputs/*.exe
 outputs/*.zip
 ui_*.png
+config/*
+!config/.gitkeep

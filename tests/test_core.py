@@ -15,8 +15,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 import backup_engine
+import config_store
 from app import BackupApp
-from config_store import ConfigStore
+from config_store import CONFIG_PATH, LOG_DIR, ConfigStore
 
 
 class BackupEngineTests(unittest.TestCase):
@@ -252,6 +253,56 @@ class BackupEngineTests(unittest.TestCase):
 
 
 class ConfigurationAndSchedulingTests(unittest.TestCase):
+    def test_portable_config_and_log_paths(self) -> None:
+        self.assertEqual(CONFIG_PATH, PROJECT_ROOT / "config" / "config.json")
+        self.assertEqual(LOG_DIR, PROJECT_ROOT / "config" / "logs")
+
+    def test_config_store_writes_to_specified_portable_path(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dba_portable_config_") as temp:
+            config_path = Path(temp) / "config" / "config.json"
+            store = ConfigStore(config_path)
+            store.data["backup_jobs"] = []
+            store.save()
+            self.assertTrue(config_path.is_file())
+
+    def test_frozen_application_uses_executable_directory(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dba_frozen_path_") as temp:
+            executable = Path(temp) / "数据自动备份助手.exe"
+            with (
+                patch.object(config_store.sys, "frozen", True, create=True),
+                patch.object(config_store.sys, "executable", str(executable)),
+            ):
+                self.assertEqual(config_store.application_dir(), Path(temp))
+
+    def test_duplicate_job_names_are_rejected(self) -> None:
+        app = BackupApp.__new__(BackupApp)
+        job = {
+            "name": "同名任务",
+            "job_type": "mysql",
+            "output_dir": "C:/Backups",
+            "backup_time": "02:00",
+            "retention_days": 30,
+            "host": "127.0.0.1",
+            "port": 3306,
+            "user": "backup",
+            "database": "sample",
+        }
+        self.assertFalse(
+            app._validate(
+                {"backup_jobs": [dict(job), dict(job)]},
+                show_dialog=False,
+            )
+        )
+
+    def test_job_name_conflict_check_ignores_the_job_being_edited(self) -> None:
+        app = BackupApp.__new__(BackupApp)
+        app.backup_jobs = [{"id": "job-1", "name": "已有任务"}]
+        jobs = [{"name": "已有任务"}]
+        self.assertIsNotNone(app._job_name_validation_error(jobs))
+        self.assertIsNone(
+            app._job_name_validation_error(jobs, existing_id="job-1")
+        )
+
     def test_legacy_config_is_migrated_to_independent_jobs(self) -> None:
         with tempfile.TemporaryDirectory(prefix="dba_config_") as temp:
             config_path = Path(temp) / "config.json"
@@ -308,6 +359,13 @@ class ConfigurationAndSchedulingTests(unittest.TestCase):
             data = ConfigStore(config_path).load()
         self.assertEqual(data["backup_jobs"], [])
         self.assertEqual(data["database_targets"], [])
+
+    def test_invalid_config_root_does_not_crash_load(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dba_invalid_root_") as temp:
+            config_path = Path(temp) / "config.json"
+            config_path.write_text("[]", encoding="utf-8")
+            data = ConfigStore(config_path).load()
+        self.assertEqual(data["backup_jobs"], [])
 
     def test_existing_job_does_not_catch_up_after_startup(self) -> None:
         now = backup_engine.dt.datetime.now()
