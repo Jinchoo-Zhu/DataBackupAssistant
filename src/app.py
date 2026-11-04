@@ -205,6 +205,7 @@ class BackupApp:
         self.backup_running = False
         self.tray_icon = None
         self._closing = False
+        self._started_at = dt.datetime.now()
         self._build_variables()
         self._load_checkbox_images()
         self._configure_window()
@@ -1223,6 +1224,9 @@ class BackupApp:
                 continue
             if str(job.get("last_attempt_date", "")) == today:
                 continue
+            scheduled_today = dt.datetime.combine(now.date(), scheduled)
+            if scheduled_today < self._started_at:
+                continue
 
             schedule_set_at = str(job.get("schedule_set_at", "")).strip()
             if schedule_set_at:
@@ -1230,7 +1234,6 @@ class BackupApp:
                     set_at = dt.datetime.fromisoformat(schedule_set_at)
                 except ValueError:
                     set_at = None
-                scheduled_today = dt.datetime.combine(now.date(), scheduled)
                 if set_at is not None and scheduled_today <= set_at:
                     continue
             due.append(str(job.get("id", "")))

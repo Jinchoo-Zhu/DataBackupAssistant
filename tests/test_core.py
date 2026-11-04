@@ -285,6 +285,7 @@ class ConfigurationAndSchedulingTests(unittest.TestCase):
     def test_new_job_after_todays_time_does_not_run_immediately(self) -> None:
         now = backup_engine.dt.datetime.now()
         app = BackupApp.__new__(BackupApp)
+        app._started_at = now - backup_engine.dt.timedelta(days=2)
         app.backup_jobs = [
             {
                 "id": "new",
@@ -308,9 +309,10 @@ class ConfigurationAndSchedulingTests(unittest.TestCase):
         self.assertEqual(data["backup_jobs"], [])
         self.assertEqual(data["database_targets"], [])
 
-    def test_existing_job_can_catch_up_missed_today(self) -> None:
+    def test_existing_job_does_not_catch_up_after_startup(self) -> None:
         now = backup_engine.dt.datetime.now()
         app = BackupApp.__new__(BackupApp)
+        app._started_at = now
         app.backup_jobs = [
             {
                 "id": "existing",
@@ -323,7 +325,23 @@ class ConfigurationAndSchedulingTests(unittest.TestCase):
                 ).isoformat(timespec="seconds"),
             }
         ]
-        self.assertEqual(app.get_due_job_ids(), ["existing"])
+        self.assertEqual(app.get_due_job_ids(), [])
+
+    def test_job_runs_when_program_was_started_before_schedule(self) -> None:
+        now = backup_engine.dt.datetime.now()
+        app = BackupApp.__new__(BackupApp)
+        app._started_at = now - backup_engine.dt.timedelta(minutes=2)
+        app.backup_jobs = [
+            {
+                "id": "running",
+                "backup_time": now.strftime("%H:%M"),
+                "last_attempt_date": "",
+                "schedule_set_at": (
+                    now - backup_engine.dt.timedelta(days=1)
+                ).isoformat(timespec="seconds"),
+            }
+        ]
+        self.assertEqual(app.get_due_job_ids(), ["running"])
 
 
 if __name__ == "__main__":
