@@ -6,6 +6,7 @@ import datetime as dt
 import logging
 import os
 import queue
+import socket
 import sqlite3
 import sys
 import tempfile
@@ -39,7 +40,16 @@ from config_store import (
     protect_password,
     unprotect_password,
 )
-from windows_integration import set_autostart
+from notification_dialog import NotificationSettingsDialog
+from notifications import (
+    DeliveryResult,
+    get_system_backup_status,
+    is_new_system_backup_result,
+    notification_channels,
+    notification_settings,
+    send_notifications,
+)
+from windows_integration import center_window_on_screen, set_autostart
 
 
 class _CenteredMessageBox:
@@ -88,6 +98,76 @@ def configure_logging() -> logging.Logger:
         )
         logger.addHandler(handler)
     return logger
+
+
+def runtime_notification_settings(config: dict) -> dict:
+    settings = notification_settings(config.get("notifications"))
+    settings["email"]["password"] = unprotect_password(
+        str(settings["email"].get("password_enc", ""))
+    )
+    settings["dingtalk"]["webhook"] = unprotect_password(
+        str(settings["dingtalk"].get("webhook_enc", ""))
+    )
+    settings["dingtalk"]["secret"] = unprotect_password(
+        str(settings["dingtalk"].get("secret_enc", ""))
+    )
+    return settings
+
+
+def should_send_notification(
+    settings: dict,
+    success: bool,
+    scope: str = "backup",
+) -> bool:
+    key = "notify_on_success" if success else "notify_on_failure"
+    return bool(notification_channels(settings, scope)) and bool(
+        settings.get(key)
+    )
+
+
+def backup_notification_message(
+    records: list[tuple[str, object, str | None]],
+    jobs_by_id: dict[str, dict],
+    elapsed: float,
+    *,
+    auto: bool,
+) -> tuple[str, str] | None:
+    if not records:
+        return None
+    failure_count = sum(1 for _, _, error in records if error)
+    success_count = len(records) - failure_count
+    if success_count == len(records):
+        outcome = "备份成功"
+    elif success_count:
+        outcome = "部分备份失败"
+    else:
+        outcome = "备份失败"
+    now_text = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    host = socket.gethostname()
+    subject = f"【数据自动备份助手】{outcome} - {host} - {now_text}"
+    lines = [
+        f"- 主机：{host}",
+        f"- 执行方式：{'自动备份' if auto else '手动备份'}",
+        f"- 执行时间：{now_text}",
+        f"- 备份状态：{outcome}",
+        f"- 任务结果：成功 {success_count}，失败 {failure_count}",
+        f"- 总耗时：{elapsed:.1f} 秒",
+        "",
+        "**任务明细**",
+    ]
+    for job_id, result, error in records:
+        job = jobs_by_id.get(str(job_id), {})
+        name = str(job.get("name", job_id or "备份任务"))
+        if error:
+            lines.append(f"- {name}：失败，{error}")
+        elif isinstance(result, BackupResult):
+            lines.append(
+                f"- {name}：成功，{result.path.name}，"
+                f"{_format_size(result.bytes_written)}"
+            )
+        else:
+            lines.append(f"- {name}：完成")
+    return subject, "\n".join(lines)
 
 
 class ImageCheckbutton(tk.Frame):
@@ -177,6 +257,7 @@ class BackupScheduler(threading.Thread):
         super().__init__(name="backup-scheduler", daemon=True)
         self.app = app
         self.stop_event = threading.Event()
+        self._next_system_backup_check = 0.0
 
     def stop(self) -> None:
         self.stop_event.set()
@@ -189,6 +270,10 @@ class BackupScheduler(threading.Thread):
                     due_ids = self.app.get_due_job_ids()
                     if due_ids:
                         self.app.events.put(("jobs_due", due_ids))
+                now = time.monotonic()
+                if now >= self._next_system_backup_check:
+                    self._next_system_backup_check = now + 30
+                    self.app.check_system_backup_status()
             except Exception:
                 self.app.logger.exception("定时调度检查失败")
             self.stop_event.wait(15)
@@ -197,6 +282,7 @@ class BackupScheduler(threading.Thread):
 class BackupApp:
     def __init__(self, root: tk.Tk, minimized: bool = False) -> None:
         self.root = root
+        self.root.withdraw()
         self.minimized = minimized
         self.store = ConfigStore()
         self.config = self.store.load()
@@ -205,6 +291,7 @@ class BackupApp:
         self.backup_running = False
         self.tray_icon = None
         self._closing = False
+        self._last_system_backup_error = ""
         self._started_at = dt.datetime.now()
         self._build_variables()
         self._load_checkbox_images()
@@ -218,6 +305,9 @@ class BackupApp:
         self.root.after(150, self._poll_events)
         if minimized:
             self.root.withdraw()
+        else:
+            center_window_on_screen(self.root)
+            self.root.deiconify()
         self.add_log("程序已启动，定时任务已就绪。")
 
     def _build_variables(self) -> None:
@@ -543,15 +633,27 @@ class BackupApp:
             borderwidth=0,
             tabmargins=(0, 0, 0, 0),
         )
+        style.layout(
+            "TNotebook",
+            [("Notebook.client", {"sticky": "nswe"})],
+        )
+        style.layout(
+            "Clean.TNotebook",
+            [("Notebook.client", {"sticky": "nswe"})],
+        )
         style.configure(
             "TNotebook.Tab",
-            background="#FAFAFA",
+            background=CARD,
             foreground=MUTED,
+            borderwidth=0,
             padding=(18, 9),
         )
         style.map(
             "TNotebook.Tab",
-            background=[("selected", CARD), ("active", ACCENT_SOFT)],
+            background=[
+                ("selected", CARD),
+                ("active", ACCENT_SOFT),
+            ],
             foreground=[("selected", ACCENT_DARK), ("active", TEXT)],
         )
 
@@ -833,6 +935,12 @@ class BackupApp:
             text="关闭窗口时隐藏到系统托盘",
             variable=self.close_to_tray,
         ).pack(side="left", padx=(24, 0))
+        ttk.Button(
+            settings,
+            text="通知设置",
+            style="Secondary.TButton",
+            command=self.open_notification_settings,
+        ).pack(side="right")
 
     def _update_job_hint(self) -> None:
         self.connection_hint.set(f"共 {len(self.backup_jobs)} 个独立备份任务")
@@ -1513,6 +1621,158 @@ class BackupApp:
             messagebox.showinfo("已保存", "备份设置已保存并立即生效。", parent=self.root)
         return True
 
+    def open_notification_settings(self) -> None:
+        dialog = NotificationSettingsDialog(
+            self.root,
+            notification_settings(self.config.get("notifications")),
+        )
+        self.root.wait_window(dialog)
+        if dialog.result is None:
+            return
+        self.config["notifications"] = dialog.result
+        self.store.data = self.config
+        try:
+            self.store.save()
+        except OSError as exc:
+            messagebox.showerror(
+                "保存失败",
+                f"无法保存通知设置：{exc}",
+                parent=self.root,
+            )
+            return
+        self.add_log("通知设置已保存。")
+
+    def _send_notification_async(
+        self,
+        subject: str,
+        body: str,
+        channels: set[str],
+    ) -> None:
+        settings = runtime_notification_settings(self.config)
+        if not channels:
+            return
+
+        def worker() -> None:
+            results = send_notifications(
+                settings,
+                subject,
+                body,
+                channels=channels,
+            )
+            self.events.put(("notification_done", results))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _notify_backup_batch(
+        self,
+        records: list[tuple[str, object, str | None]],
+        elapsed: float,
+        auto: bool,
+    ) -> None:
+        settings = runtime_notification_settings(self.config)
+        failure_count = sum(1 for _, _, error in records if error)
+        success = not failure_count
+        channels = notification_channels(settings, "backup")
+        if not should_send_notification(settings, success, "backup"):
+            return
+        jobs_by_id = {
+            str(job.get("id", "")): job for job in self.backup_jobs
+        }
+        message = backup_notification_message(
+            records,
+            jobs_by_id,
+            elapsed,
+            auto=auto,
+        )
+        if message is not None:
+            self._send_notification_async(*message, channels)
+
+    def check_system_backup_status(self) -> None:
+        settings = notification_settings(self.config.get("notifications"))
+        binding = settings["windows_backup"]
+        channels = notification_channels(settings, "windows_backup")
+        if not binding.get("enabled") or not channels:
+            self._last_system_backup_error = ""
+            return
+        task_path = str(binding.get("task_path", "")).strip()
+        task_name = str(binding.get("task_name", "")).strip()
+        provider = str(binding.get("provider", "scheduled_task"))
+        if not task_name or (provider != "windows_server_backup" and not task_path):
+            self._last_system_backup_error = ""
+            return
+        try:
+            status = get_system_backup_status(binding)
+        except Exception as exc:  # noqa: BLE001
+            message = f"读取系统备份任务失败：{exc}"
+            if message != self._last_system_backup_error:
+                self._last_system_backup_error = message
+                self.events.put(("notification_error", message))
+            return
+        self._last_system_backup_error = ""
+
+        last_run = str(status.get("last_run_time", "")).strip()
+        baseline_initialized = bool(
+            binding.get("baseline_initialized")
+        )
+        if not baseline_initialized:
+            self.events.put(("system_backup_baseline", status))
+            return
+        if not last_run:
+            return
+
+        if is_new_system_backup_result(binding, status):
+            self.events.put(("system_backup_result", status))
+
+    def _update_system_backup_baseline(self, status: object) -> None:
+        if not isinstance(status, dict):
+            return
+        settings = notification_settings(self.config.get("notifications"))
+        binding = settings["windows_backup"]
+        binding["last_observed_run_time"] = str(
+            status.get("last_run_time", "")
+        )
+        binding["last_observed_result"] = str(
+            status.get("last_task_result", "")
+        )
+        binding["last_observed_state"] = str(status.get("state", ""))
+        binding["baseline_initialized"] = True
+        self.config["notifications"] = settings
+        self.store.data = self.config
+        try:
+            self.store.save()
+        except OSError as exc:
+            self.logger.warning("保存系统备份通知状态失败：%s", exc)
+
+    def _notify_system_backup(self, status: object) -> None:
+        if not isinstance(status, dict):
+            return
+        settings = runtime_notification_settings(self.config)
+        result_code = str(status.get("last_task_result", "")).strip()
+        success = result_code == "0"
+        channels = notification_channels(settings, "windows_backup")
+        if not should_send_notification(settings, success, "windows_backup"):
+            return
+        host = socket.gethostname()
+        outcome = "备份成功" if success else "备份失败"
+        task_name = str(status.get("task_name", "Windows 系统备份"))
+        task_path = str(status.get("task_path", ""))
+        next_run = str(status.get("next_run_time", "")) or "未知"
+        subject = f"【系统备份】{outcome} - {host}"
+        body_lines = [
+            f"- 主机：{host}",
+            f"- 备份任务：{task_name}",
+            f"- 任务路径：{task_path}",
+            f"- 执行结果：{outcome}",
+            f"- 最近运行：{status.get('last_run_time', '')}",
+            f"- 下次运行：{next_run}",
+            f"- 退出代码：{result_code or '未知'}",
+        ]
+        backup_target = str(status.get("backup_target", "")).strip()
+        if backup_target:
+            body_lines.append(f"- 备份目标：{backup_target}")
+        body = "\n".join(body_lines)
+        self._send_notification_async(subject, body, channels)
+
 
 
 
@@ -1549,6 +1809,26 @@ class BackupApp:
                     self._finish_job_batch(records, float(elapsed), bool(auto))
                 elif kind == "jobs_due":
                     self.start_jobs_by_id(list(payload), auto=True)
+                elif kind == "system_backup_baseline":
+                    self._update_system_backup_baseline(payload)
+                elif kind == "system_backup_result":
+                    self._update_system_backup_baseline(payload)
+                    self._notify_system_backup(payload)
+                elif kind == "notification_done":
+                    for item in payload:
+                        if isinstance(item, DeliveryResult):
+                            self.add_log(
+                                f"通知发送（{item.channel}）：{item.message}",
+                                "muted" if item.success else "error",
+                            )
+                            if not item.success:
+                                self.logger.warning(
+                                    "通知发送失败（%s）：%s",
+                                    item.channel,
+                                    item.message,
+                                )
+                elif kind == "notification_error":
+                    self.add_log(str(payload), "error")
                 elif kind == "show_window":
                     self.show_window()
                 elif kind == "start_all":
@@ -1622,6 +1902,7 @@ class BackupApp:
             self.store.save()
         except OSError as exc:
             self.logger.error("保存任务执行结果失败：%s", exc)
+        self._notify_backup_batch(records, elapsed, auto)
         self._refresh_job_tree()
         if error_messages and not auto:
             messagebox.showerror(
@@ -1856,6 +2137,11 @@ def backup_once() -> int:
         logger.error("命令行备份失败：没有备份任务")
         return 1
     failed = 0
+    started = time.monotonic()
+    records: list[tuple[str, object, str | None]] = []
+    jobs_by_id = {
+        str(job.get("id", "")): job for job in jobs
+    }
     for job in jobs:
         job_id = str(job.get("id", ""))
         try:
@@ -1872,15 +2158,39 @@ def backup_once() -> int:
                         "%Y-%m-%d %H:%M:%S"
                     )
                     break
+            records.append((job_id, result, None))
         except Exception:  # noqa: BLE001
             failed += 1
+            error = traceback.format_exc()
             logger.error(
                 "命令行任务失败：%s\n%s",
                 job.get("name", ""),
-                traceback.format_exc(),
+                error,
             )
+            records.append((job_id, None, "命令行备份失败，详情见日志。"))
     store.data = config
     store.save()
+    settings = runtime_notification_settings(config)
+    success = failed == 0
+    channels = notification_channels(settings, "backup")
+    if should_send_notification(settings, success, "backup"):
+        message = backup_notification_message(
+            records,
+            jobs_by_id,
+            time.monotonic() - started,
+            auto=False,
+        )
+        if message is not None:
+            for delivery in send_notifications(
+                settings,
+                *message,
+                channels=channels,
+            ):
+                (logger.info if delivery.success else logger.warning)(
+                    "通知发送（%s）：%s",
+                    delivery.channel,
+                    delivery.message,
+                )
     return 1 if failed else 0
 
 

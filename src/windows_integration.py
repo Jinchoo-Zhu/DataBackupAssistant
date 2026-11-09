@@ -10,6 +10,60 @@ from typing import Any
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 RUN_VALUE_NAME = "DataBackupAssistant"
 LEGACY_RUN_VALUE_NAME = "DatabaseBackupAssistant"
+SPI_GETWORKAREA = 0x0030
+
+
+def center_window_on_screen(window: Any) -> None:
+    window.update_idletasks()
+    geometry = window.geometry()
+    try:
+        size = geometry.split("+", 1)[0]
+        width, height = (int(value) for value in size.split("x", 1))
+    except (TypeError, ValueError):
+        width = max(window.winfo_width(), window.winfo_reqwidth())
+        height = max(window.winfo_height(), window.winfo_reqheight())
+
+    if os.name == "nt":
+        try:
+            user32 = ctypes.windll.user32
+            window_handle = int(window.wm_frame(), 16)
+            window_rect = wintypes.RECT()
+            if user32.GetWindowRect(
+                window_handle,
+                ctypes.byref(window_rect),
+            ):
+                outer_width = window_rect.right - window_rect.left
+                outer_height = window_rect.bottom - window_rect.top
+                if outer_width > 0 and outer_height > 0:
+                    width = outer_width
+                    height = outer_height
+            work_area = wintypes.RECT()
+            if user32.SystemParametersInfoW(
+                SPI_GETWORKAREA,
+                0,
+                ctypes.byref(work_area),
+                0,
+            ):
+                area_width = work_area.right - work_area.left
+                area_height = work_area.bottom - work_area.top
+                x = work_area.left + (area_width - width) // 2
+                y = work_area.top + (area_height - height) // 2
+                if user32.SetWindowPos(
+                    window_handle,
+                    0,
+                    x,
+                    y,
+                    0,
+                    0,
+                    0x0015,
+                ):
+                    return
+        except (AttributeError, OSError, TypeError, ValueError):
+            pass
+
+    x = (window.winfo_screenwidth() - width) // 2
+    y = (window.winfo_screenheight() - height) // 2
+    window.geometry(f"+{max(0, x)}+{max(0, y)}")
 
 
 def center_window_over_parent(window: Any, parent: Any) -> None:

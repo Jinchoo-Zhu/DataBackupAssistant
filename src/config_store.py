@@ -10,6 +10,8 @@ from ctypes import wintypes
 from pathlib import Path
 from typing import Any
 
+from notifications import DEFAULT_NOTIFICATION_SETTINGS, notification_settings
+
 APP_NAME = "DataBackupAssistant"
 APP_DISPLAY_NAME = "数据自动备份助手"
 APP_VERSION = "1.0.0"
@@ -51,6 +53,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "last_backup_status": "",
     "last_backup_file": "",
     "last_auto_attempt_date": "",
+    "notifications": DEFAULT_NOTIFICATION_SETTINGS,
 }
 
 
@@ -128,6 +131,9 @@ class ConfigStore:
             except (OSError, ValueError):
                 loaded = {}
         self.data = {**DEFAULT_CONFIG, **loaded}
+        self.data["notifications"] = notification_settings(
+            loaded.get("notifications")
+        )
         raw_targets = self.data.get("database_targets") or []
         self.data["database_targets"] = [
             dict(target)

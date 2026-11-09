@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
+import queue
 import shutil
 import sqlite3
 import sys
@@ -14,9 +16,11 @@ from unittest.mock import patch
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
+import app as app_module
 import backup_engine
 import config_store
-from app import BackupApp
+import notifications
+from app import BackupApp, backup_notification_message, should_send_notification
 from config_store import CONFIG_PATH, LOG_DIR, ConfigStore
 
 
@@ -250,6 +254,324 @@ class BackupEngineTests(unittest.TestCase):
             self.assertFalse(
                 any(name.startswith("backups/") for name in archive.namelist())
             )
+
+
+class NotificationTests(unittest.TestCase):
+    def test_notification_settings_are_merged_and_typed(self) -> None:
+        settings = notifications.notification_settings(
+            {
+                "notify_on_failure": False,
+                "email": {
+                    "smtp_host": "smtp.example.com",
+                    "smtp_port": "2525",
+                },
+            }
+        )
+        self.assertFalse(settings["notify_on_failure"])
+        self.assertEqual(
+            settings["email"]["smtp_host"],
+            "smtp.example.com",
+        )
+        self.assertEqual(settings["email"]["smtp_port"], 2525)
+
+    def test_notification_channels_are_selected_per_backup_scope(self) -> None:
+        settings = notifications.notification_settings(
+            {
+                "backup": {
+                    "email_enabled": True,
+                    "dingtalk_enabled": False,
+                },
+                "email": {
+                    "smtp_host": "smtp.example.com",
+                    "sender": "sender@example.com",
+                    "recipients": "receiver@example.com",
+                },
+            }
+        )
+        self.assertTrue(
+            notifications.channel_is_configured(settings, "email")
+        )
+        self.assertEqual(
+            notifications.notification_channels(settings, "backup"),
+            {"email"},
+        )
+        self.assertEqual(
+            notifications.notification_channels(settings, "windows_backup"),
+            set(),
+        )
+
+    def test_email_uses_configured_smtp_and_recipients(self) -> None:
+        sent = {}
+
+        class FakeSMTP:
+            def __init__(self, host, port, **_kwargs):
+                sent["server"] = (host, port)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def ehlo(self):
+                return None
+
+            def login(self, username, password):
+                sent["login"] = (username, password)
+
+            def send_message(self, message):
+                sent["message"] = message
+
+        settings = notifications.notification_settings(
+            {
+                "email": {
+                    "smtp_host": "smtp.example.com",
+                    "smtp_port": 465,
+                    "security": "ssl",
+                    "username": "sender@example.com",
+                    "sender": "sender@example.com",
+                    "recipients": "a@example.com; b@example.com",
+                },
+                "notify_on_success": True,
+            }
+        )
+        settings["email"]["password"] = "secret"
+        with patch.object(notifications.smtplib, "SMTP_SSL", FakeSMTP):
+            notifications.send_email(settings, "备份成功", "测试内容")
+
+        self.assertEqual(sent["server"], ("smtp.example.com", 465))
+        self.assertEqual(sent["login"], ("sender@example.com", "secret"))
+        self.assertEqual(
+            sent["message"]["To"],
+            "a@example.com, b@example.com",
+        )
+
+    def test_dingtalk_webhook_is_signed_and_sent(self) -> None:
+        captured = {}
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def read(self):
+                return b'{"errcode":0,"errmsg":"ok"}'
+
+        def fake_urlopen(request, timeout):
+            captured["url"] = request.full_url
+            captured["timeout"] = timeout
+            captured["payload"] = json.loads(request.data.decode("utf-8"))
+            return FakeResponse()
+
+        settings = notifications.notification_settings(
+            {
+                "dingtalk": {
+                    "at_mobiles": "13800000000",
+                }
+            }
+        )
+        settings["dingtalk"]["webhook"] = (
+            "https://oapi.dingtalk.com/robot/send?access_token=test-token"
+        )
+        settings["dingtalk"]["secret"] = "test-secret"
+        with (
+            patch.object(
+                notifications.time,
+                "time",
+                return_value=1700000000,
+            ),
+            patch.object(notifications, "urlopen", fake_urlopen),
+        ):
+            notifications.send_dingtalk(settings, "备份报告", "全部成功")
+
+        self.assertIn("timestamp=1700000000000", captured["url"])
+        self.assertIn("sign=", captured["url"])
+        self.assertEqual(captured["payload"]["msgtype"], "markdown")
+        self.assertEqual(
+            captured["payload"]["at"]["atMobiles"],
+            ["13800000000"],
+        )
+        self.assertTrue(
+            captured["payload"]["markdown"]["text"].endswith(
+                "@13800000000"
+            )
+        )
+
+    def test_system_backup_task_parser(self) -> None:
+        output = json.dumps(
+            [
+                {
+                    "task_path": "\\Microsoft\\Windows\\Backup\\",
+                    "task_name": "WindowsBackup",
+                    "state": "Ready",
+                    "last_run_time": "2026-11-09T23:30:00+08:00",
+                    "next_run_time": "2026-11-10T23:30:00+08:00",
+                    "last_task_result": "0",
+                }
+            ],
+            ensure_ascii=False,
+        )
+        with patch.object(
+            notifications,
+            "_run_powershell",
+            return_value=output,
+        ):
+            tasks = notifications.list_system_backup_tasks()
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0]["task_name"], "WindowsBackup")
+        self.assertEqual(tasks[0]["last_task_result"], "0")
+
+    def test_windows_server_backup_reads_configured_target(self) -> None:
+        output = json.dumps(
+            {
+                "provider": "windows_server_backup",
+                "task_path": "",
+                "task_name": "Windows Server Backup（系统计划）",
+                "state": "NotRun",
+                "last_run_time": "",
+                "next_run_time": "2026-11-09T23:30:00+08:00",
+                "last_task_result": "",
+                "backup_target": "WIN-BBP 2026_11_09 13:33 DISK_01",
+            },
+            ensure_ascii=False,
+        )
+        captured: dict[str, str] = {}
+
+        def fake_run_powershell(script: str, timeout: int = 30) -> str:
+            del timeout
+            captured["script"] = script
+            return output
+
+        with patch.object(
+            notifications,
+            "_run_powershell",
+            side_effect=fake_run_powershell,
+        ):
+            status = notifications.get_windows_server_backup_status()
+
+        self.assertIsNotNone(status)
+        self.assertEqual(
+            status["backup_target"],
+            "WIN-BBP 2026_11_09 13:33 DISK_01",
+        )
+        self.assertIn("Get-WBPolicy", captured["script"])
+        self.assertIn("Get-WBBackupTarget", captured["script"])
+        self.assertIn("Get-WBDisk", captured["script"])
+
+    def test_system_backup_detection_avoids_duplicate_and_running_notice(
+        self,
+    ) -> None:
+        previous = {
+            "last_observed_run_time": "2026-11-09T23:30:00+08:00",
+            "last_observed_result": "0",
+            "last_observed_state": "Ready",
+        }
+        current = {
+            "last_run_time": "2026-11-10T23:30:00+08:00",
+            "last_task_result": "0",
+            "state": "Ready",
+        }
+        self.assertTrue(
+            notifications.is_new_system_backup_result(previous, current)
+        )
+        self.assertFalse(
+            notifications.is_new_system_backup_result(
+                {
+                    **previous,
+                    "last_observed_run_time": current["last_run_time"],
+                },
+                current,
+            )
+        )
+        self.assertFalse(
+            notifications.is_new_system_backup_result(
+                previous,
+                {**current, "state": "Running"},
+            )
+        )
+        self.assertTrue(
+            notifications.is_new_system_backup_result(
+                {**previous, "last_observed_state": "Running"},
+                {
+                    "last_run_time": previous["last_observed_run_time"],
+                    "last_task_result": "0",
+                    "state": "Ready",
+                },
+            )
+        )
+        self.assertTrue(
+            notifications.is_new_system_backup_result(
+                {
+                    "baseline_initialized": True,
+                    "last_observed_run_time": "",
+                    "last_observed_result": "",
+                    "last_observed_state": "NotRun",
+                },
+                current,
+            )
+        )
+
+    def test_app_queues_new_system_backup_result_once(self) -> None:
+        app = BackupApp.__new__(BackupApp)
+        app.events = queue.Queue()
+        app._last_system_backup_error = ""
+        app.config = {
+            "notifications": {
+                "windows_backup": {
+                    "enabled": True,
+                    "email_enabled": True,
+                    "dingtalk_enabled": False,
+                    "task_path": "\\Microsoft\\Windows\\Backup\\",
+                    "task_name": "WindowsBackup",
+                    "baseline_initialized": True,
+                    "last_observed_run_time": "2026-11-09T23:30:00+08:00",
+                    "last_observed_result": "0",
+                    "last_observed_state": "Ready",
+                },
+            }
+        }
+        status = {
+            "task_path": "\\Microsoft\\Windows\\Backup\\",
+            "task_name": "WindowsBackup",
+            "state": "Ready",
+            "last_run_time": "2026-11-10T23:30:00+08:00",
+            "next_run_time": "2026-11-11T23:30:00+08:00",
+            "last_task_result": "0",
+        }
+        with patch.object(
+            app_module,
+            "get_system_backup_status",
+            return_value=status,
+        ):
+            app.check_system_backup_status()
+        kind, payload = app.events.get_nowait()
+        self.assertEqual(kind, "system_backup_result")
+        self.assertEqual(payload["last_task_result"], "0")
+
+    def test_backup_notification_message_and_trigger_policy(self) -> None:
+        result = backup_engine.BackupResult(
+            Path("C:/Backup/example.zip"),
+            2048,
+            "example",
+        )
+        subject, body = backup_notification_message(
+            [("job-1", result, None)],
+            {"job-1": {"name": "测试备份"}},
+            1.5,
+            auto=True,
+        )
+        self.assertIn("备份成功", subject)
+        self.assertIn("备份状态：备份成功", body)
+        self.assertIn("测试备份", body)
+        self.assertIn("example.zip", body)
+        settings = notifications.notification_settings(
+            {"notify_on_success": True}
+        )
+        self.assertFalse(should_send_notification(settings, True))
+        settings["backup"]["email_enabled"] = True
+        self.assertTrue(should_send_notification(settings, True))
 
 
 class ConfigurationAndSchedulingTests(unittest.TestCase):
