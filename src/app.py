@@ -159,12 +159,9 @@ def backup_notification_message(
         job = jobs_by_id.get(str(job_id), {})
         name = str(job.get("name", job_id or "备份任务"))
         if error:
-            lines.append(f"- {name}：失败，{error}")
+            lines.append(f"- {name}：备份失败")
         elif isinstance(result, BackupResult):
-            lines.append(
-                f"- {name}：成功，{result.path.name}，"
-                f"{_format_size(result.bytes_written)}"
-            )
+            lines.append(f"- {name}：备份成功")
         else:
             lines.append(f"- {name}：完成")
     return subject, "\n".join(lines)

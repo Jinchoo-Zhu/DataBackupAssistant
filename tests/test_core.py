@@ -565,7 +565,9 @@ class NotificationTests(unittest.TestCase):
         self.assertIn("备份成功", subject)
         self.assertIn("备份状态：备份成功", body)
         self.assertIn("测试备份", body)
-        self.assertIn("example.zip", body)
+        self.assertIn("- 测试备份：备份成功", body)
+        self.assertNotIn("example.zip", body)
+        self.assertNotIn("2.0 KB", body)
         settings = notifications.notification_settings(
             {"notify_on_success": True}
         )
