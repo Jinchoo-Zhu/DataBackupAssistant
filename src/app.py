@@ -125,6 +125,25 @@ def should_send_notification(
     )
 
 
+def format_notification_time(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        parsed = dt.datetime.fromisoformat(text)
+    except ValueError:
+        return text
+    return parsed.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def notification_subject(
+    name: str,
+    outcome: str,
+    timestamp: str,
+) -> str:
+    return f"【{name}】{outcome} - {timestamp}"
+
+
 def backup_notification_message(
     records: list[tuple[str, object, str | None]],
     jobs_by_id: dict[str, dict],
@@ -142,9 +161,9 @@ def backup_notification_message(
         outcome = "部分备份失败"
     else:
         outcome = "备份失败"
-    now_text = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now_text = format_notification_time(dt.datetime.now())
     host = socket.gethostname()
-    subject = f"【数据自动备份助手】{outcome} - {host} - {now_text}"
+    subject = notification_subject("数据备份", outcome, now_text)
     lines = [
         f"- 主机：{host}",
         f"- 执行方式：{'自动备份' if auto else '手动备份'}",
@@ -949,8 +968,6 @@ class BackupApp:
             if job.get("id")
         }
         self.job_checked.intersection_update(valid_ids)
-        if selected_id in valid_ids:
-            self.job_checked = {selected_id}
         for item in self.job_tree.get_children():
             self.job_tree.delete(item)
 
@@ -1286,7 +1303,6 @@ class BackupApp:
             )
             self.backup_jobs.append(job)
             new_ids.append(job["id"])
-        self.job_checked = set(new_ids)
         self._refresh_job_tree(new_ids[0] if new_ids else None)
 
     def remove_selected_jobs(self) -> None:
@@ -1753,14 +1769,22 @@ class BackupApp:
         outcome = "备份成功" if success else "备份失败"
         task_name = str(status.get("task_name", "Windows 系统备份"))
         task_path = str(status.get("task_path", ""))
-        next_run = str(status.get("next_run_time", "")) or "未知"
-        subject = f"【系统备份】{outcome} - {host}"
+        now_text = format_notification_time(dt.datetime.now())
+        last_run = (
+            format_notification_time(status.get("last_run_time", ""))
+            or "未知"
+        )
+        next_run = (
+            format_notification_time(status.get("next_run_time", ""))
+            or "未知"
+        )
+        subject = notification_subject("Windows备份", outcome, now_text)
         body_lines = [
             f"- 主机：{host}",
             f"- 备份任务：{task_name}",
             f"- 任务路径：{task_path}",
             f"- 执行结果：{outcome}",
-            f"- 最近运行：{status.get('last_run_time', '')}",
+            f"- 最近运行：{last_run}",
             f"- 下次运行：{next_run}",
             f"- 退出代码：{result_code or '未知'}",
         ]

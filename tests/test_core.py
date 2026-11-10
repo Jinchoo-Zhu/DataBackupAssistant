@@ -20,7 +20,13 @@ import app as app_module
 import backup_engine
 import config_store
 import notifications
-from app import BackupApp, backup_notification_message, should_send_notification
+from app import (
+    BackupApp,
+    backup_notification_message,
+    format_notification_time,
+    notification_subject,
+    should_send_notification,
+)
 from config_store import CONFIG_PATH, LOG_DIR, ConfigStore
 
 
@@ -563,11 +569,30 @@ class NotificationTests(unittest.TestCase):
             auto=True,
         )
         self.assertIn("备份成功", subject)
+        self.assertRegex(
+            subject,
+            r"^【数据备份】备份成功 - \d{4}-\d{2}-\d{2} "
+            r"\d{2}:\d{2}:\d{2}$",
+        )
         self.assertIn("备份状态：备份成功", body)
         self.assertIn("测试备份", body)
         self.assertIn("- 测试备份：备份成功", body)
         self.assertNotIn("example.zip", body)
         self.assertNotIn("2.0 KB", body)
+        self.assertEqual(
+            format_notification_time(
+                "2026-11-09T23:30:32.0000000+08:00"
+            ),
+            "2026-11-09 23:30:32",
+        )
+        self.assertEqual(
+            notification_subject(
+                "Windows备份",
+                "备份成功",
+                "2026-11-10 02:05:12",
+            ),
+            "【Windows备份】备份成功 - 2026-11-10 02:05:12",
+        )
         settings = notifications.notification_settings(
             {"notify_on_success": True}
         )
@@ -626,6 +651,86 @@ class ConfigurationAndSchedulingTests(unittest.TestCase):
         self.assertIsNone(
             app._job_name_validation_error(jobs, existing_id="job-1")
         )
+
+    def test_editing_job_does_not_change_checked_state(self) -> None:
+        app = BackupApp.__new__(BackupApp)
+        app.backup_jobs = [
+            {
+                "id": "job-1",
+                "name": "待编辑任务",
+                "job_type": "files",
+                "file_source": "D:/Source",
+                "output_dir": "E:/Backup",
+                "backup_time": "23:30",
+                "retention_days": 30,
+            },
+            {
+                "id": "job-2",
+                "name": "已勾选任务",
+                "job_type": "files",
+                "file_source": "D:/Other",
+                "output_dir": "E:/Backup",
+                "backup_time": "23:30",
+                "retention_days": 30,
+            },
+        ]
+        app.job_checked = {"job-2"}
+        refreshed: list[str | None] = []
+        app._refresh_job_tree = lambda selected_id=None: refreshed.append(
+            selected_id
+        )
+        app._store_backup_jobs(
+            [
+                {
+                    "name": "编辑后的任务",
+                    "job_type": "files",
+                    "file_source": "D:/Source",
+                    "output_dir": "E:/Backup",
+                    "backup_time": "23:30",
+                    "retention_days": 30,
+                }
+            ],
+            existing_id="job-1",
+        )
+
+        self.assertEqual(app.job_checked, {"job-2"})
+        self.assertEqual(refreshed, ["job-1"])
+
+    def test_adding_job_does_not_auto_check_it(self) -> None:
+        app = BackupApp.__new__(BackupApp)
+        app.backup_jobs = [
+            {
+                "id": "job-1",
+                "name": "已有任务",
+                "job_type": "files",
+                "file_source": "D:/Source",
+                "output_dir": "E:/Backup",
+                "backup_time": "23:30",
+                "retention_days": 30,
+            }
+        ]
+        app.job_checked = {"job-1"}
+        refreshed: list[str | None] = []
+        app._refresh_job_tree = lambda selected_id=None: refreshed.append(
+            selected_id
+        )
+        app._store_backup_jobs(
+            [
+                {
+                    "name": "新增任务",
+                    "job_type": "files",
+                    "file_source": "D:/New",
+                    "output_dir": "E:/Backup",
+                    "backup_time": "23:30",
+                    "retention_days": 30,
+                }
+            ]
+        )
+
+        self.assertEqual(app.job_checked, {"job-1"})
+        self.assertNotIn("job-1", refreshed)
+        self.assertEqual(len(refreshed), 1)
+        self.assertIsNotNone(refreshed[0])
 
     def test_legacy_config_is_migrated_to_independent_jobs(self) -> None:
         with tempfile.TemporaryDirectory(prefix="dba_config_") as temp:

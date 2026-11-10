@@ -532,7 +532,7 @@ class NotificationSettingsDialog(_TabbedDialog):
         ).pack(anchor="w")
         tk.Label(
             title_box,
-            text="分别设置程序备份和 Windows备份的通知方式。",
+            text="分别设置数据备份和 Windows备份的通知方式。",
             bg=PANEL,
             fg=MUTED,
             font=("Microsoft YaHei UI", 9),
@@ -577,21 +577,21 @@ class NotificationSettingsDialog(_TabbedDialog):
             command=self.destroy,
         ).pack(side="right", padx=(0, 10))
 
-        self._create_tabs(outer, ("程序备份", "Windows备份"))
+        self._create_tabs(outer, ("数据备份", "Windows备份"))
         self._build_backup_tab(self._tab_pages[0])
         self._build_windows_tab(self._tab_pages[1])
 
     def _build_backup_tab(self, tab: tk.Frame) -> None:
         tk.Label(
             tab,
-            text="数据自动备份助手",
+            text="数据备份",
             bg=PANEL,
             fg=TEXT,
             font=("Microsoft YaHei UI", 11, "bold"),
         ).pack(anchor="w")
         tk.Label(
             tab,
-            text="当前程序完成数据库、SQLite 或文件备份后发送通知。",
+            text="当前数据备份任务完成后发送通知。",
             bg=PANEL,
             fg=MUTED,
             font=("Microsoft YaHei UI", 9),
