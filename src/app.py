@@ -329,6 +329,7 @@ class BackupApp:
     def _build_variables(self) -> None:
         self.backup_jobs: list[dict] = []
         self.job_checked: set[str] = set()
+        self._job_header_check_widget: tk.Label | None = None
         self.start_with_windows = tk.BooleanVar()
         self.close_to_tray = tk.BooleanVar()
         self.status_text = tk.StringVar(value="准备就绪")
@@ -337,6 +338,8 @@ class BackupApp:
     def _load_checkbox_images(self) -> None:
         self.checkbox_checked_image: tk.PhotoImage | None = None
         self.checkbox_unchecked_image: tk.PhotoImage | None = None
+        self.checkbox_checked_header_image: tk.PhotoImage | None = None
+        self.checkbox_unchecked_header_image: tk.PhotoImage | None = None
         try:
             self.checkbox_checked_image = tk.PhotoImage(
                 file=str(resource_path("checkbox-checked.png"))
@@ -344,9 +347,29 @@ class BackupApp:
             self.checkbox_unchecked_image = tk.PhotoImage(
                 file=str(resource_path("checkbox-unchecked.png"))
             )
+            self.checkbox_checked_header_image = (
+                self._header_checkbox_image(self.checkbox_checked_image)
+            )
+            self.checkbox_unchecked_header_image = (
+                self._header_checkbox_image(self.checkbox_unchecked_image)
+            )
         except tk.TclError:
             self.checkbox_checked_image = None
             self.checkbox_unchecked_image = None
+            self.checkbox_checked_header_image = None
+            self.checkbox_unchecked_header_image = None
+
+    @staticmethod
+    def _header_checkbox_image(image: tk.PhotoImage) -> tk.PhotoImage:
+        # Treeview headings reserve extra space on the left of #0.
+        # Right-side transparent padding moves the visible icon back to
+        # the center line used by the row checkboxes.
+        padded = tk.PhotoImage(
+            width=image.width() + 11,
+            height=image.height(),
+        )
+        padded.tk.call(padded.name, "copy", image.name, "-to", 0, 0)
+        return padded
 
     def _create_checkbutton(
         self,
@@ -839,11 +862,12 @@ class BackupApp:
             columns=("name", "type", "source", "output", "time", "keep", "status"),
             show=("tree", "headings"),
             height=8,
-            selectmode="extended",
+            selectmode="none",
         )
         self.job_tree.heading(
             "#0",
-            text="选择",
+            text="",
+            image=self.checkbox_unchecked_header_image or "",
             anchor="center",
             command=self._toggle_all_jobs,
         )
@@ -913,7 +937,11 @@ class BackupApp:
             x_scroll,
             y_scroll,
         )
-        self.job_tree.bind("<Button-1>", self._handle_job_tree_click, add="+")
+        self.job_tree.bind(
+            "<ButtonRelease-1>",
+            self._handle_job_tree_click,
+            add="+",
+        )
         self.job_tree.bind("<Motion>", self._update_job_tree_cursor, add="+")
         self.job_tree.bind(
             "<Leave>",
@@ -921,6 +949,7 @@ class BackupApp:
             add="+",
         )
         self.job_tree.bind("<Double-1>", self._handle_job_tree_double_click)
+        self._install_job_header_checkbox()
 
         actions = tk.Frame(self.task_card, bg=CARD)
         actions.pack(fill="x", pady=(8, 8))
@@ -1014,6 +1043,7 @@ class BackupApp:
         if selected_id and self.job_tree.exists(selected_id):
             self.job_tree.focus(selected_id)
             self.job_tree.see(selected_id)
+        self._update_job_header_checkbox()
         self._update_job_hint()
 
     @staticmethod
@@ -1111,12 +1141,112 @@ class BackupApp:
             else self.checkbox_unchecked_image
         )
 
+    def _job_header_checkbox_image(
+        self,
+        checked: bool,
+    ) -> tk.PhotoImage | None:
+        return (
+            self.checkbox_checked_header_image
+            if checked
+            else self.checkbox_unchecked_header_image
+        )
+
     def _set_job_checkbox(self, iid: str, checked: bool) -> None:
         image = self._job_checkbox_image(checked)
         if image is not None:
             self.job_tree.item(iid, image=image, text="")
         else:
             self.job_tree.item(iid, text="✓" if checked else "□")
+
+    def _update_job_header_checkbox(self) -> None:
+        all_ids = {
+            str(job.get("id", ""))
+            for job in self.backup_jobs
+            if job.get("id")
+        }
+        checked = bool(all_ids) and all_ids.issubset(self.job_checked)
+        image = self._job_header_checkbox_image(checked)
+        options: dict[str, object] = {"text": "", "anchor": "center"}
+        if image is not None:
+            options["image"] = image
+        self.job_tree.heading("#0", **options)
+        header_check = getattr(self, "_job_header_check_widget", None)
+        if header_check is not None:
+            row_image = self._job_checkbox_image(checked)
+            header_check.configure(
+                image=row_image or "",
+                text="" if row_image is not None else ("☑" if checked else "□"),
+            )
+
+    def _install_job_header_checkbox(self) -> None:
+        header_check = tk.Label(
+            self.job_tree,
+            image=self.checkbox_unchecked_image or "",
+            text="" if self.checkbox_unchecked_image is not None else "□",
+            bg="#FAFAFA",
+            fg=TEXT,
+            bd=0,
+            padx=0,
+            pady=0,
+            cursor="hand2",
+            takefocus=False,
+            highlightthickness=0,
+        )
+        header_check.bind(
+            "<ButtonRelease-1>",
+            self._handle_job_header_check_click,
+        )
+        header_check.bind(
+            "<Enter>",
+            lambda _event: header_check.configure(bg="#F0F0F0"),
+        )
+        header_check.bind(
+            "<Leave>",
+            lambda _event: header_check.configure(bg="#FAFAFA"),
+        )
+        self._job_header_check_widget = header_check
+        self.job_tree.bind(
+            "<Configure>",
+            self._place_job_header_checkbox,
+            add="+",
+        )
+        self.job_tree.bind(
+            "<Map>",
+            self._place_job_header_checkbox,
+            add="+",
+        )
+        self.job_tree.after_idle(self._place_job_header_checkbox)
+
+    def _place_job_header_checkbox(
+        self,
+        _event: tk.Event | None = None,
+    ) -> None:
+        header_check = getattr(self, "_job_header_check_widget", None)
+        if header_check is None or not self.job_tree.winfo_exists():
+            return
+        children = self.job_tree.get_children()
+        bbox: tuple[int, ...] = ()
+        if children:
+            bbox = self.job_tree.bbox(children[0], "#0")
+        if bbox:
+            cell_x, cell_bottom, cell_width, _cell_height = bbox
+        else:
+            cell_x = 2
+            cell_bottom = 40
+            cell_width = int(float(self.job_tree.column("#0", "width")))
+        header_check.place(
+            x=cell_x,
+            y=2,
+            width=max(22, cell_width - 1),
+            height=max(22, cell_bottom - 3),
+        )
+
+    def _handle_job_header_check_click(
+        self,
+        _event: tk.Event,
+    ) -> str:
+        self._toggle_all_jobs()
+        return "break"
 
     def _handle_job_tree_click(self, event: tk.Event) -> str | None:
         column = self.job_tree.identify_column(event.x)
@@ -1135,6 +1265,7 @@ class BackupApp:
             self.job_checked.add(iid)
             checked = True
         self._set_job_checkbox(iid, checked)
+        self._update_job_header_checkbox()
         return "break"
 
     def _update_job_tree_cursor(self, event: tk.Event) -> None:
@@ -1167,6 +1298,7 @@ class BackupApp:
             self.job_checked = set(all_ids)
         for job_id in all_ids:
             self._set_job_checkbox(job_id, job_id in self.job_checked)
+        self._update_job_header_checkbox()
 
     def add_backup_job(self, job_type: str) -> None:
         dialog = BackupJobDialog(

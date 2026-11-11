@@ -525,18 +525,19 @@ class BackupJobDialog(tk.Toplevel):
             columns=("database",),
             show=("tree", "headings"),
             height=3,
-            selectmode="extended",
+            selectmode="none",
         )
         self.database_tree.heading(
             "#0",
-            text="选择",
+            text="",
+            image=self.checkbox_unchecked_image or "",
             anchor="center",
             command=self._toggle_all_mysql_databases,
         )
         self.database_tree.column(
             "#0",
-            width=76,
-            minwidth=76,
+            width=58,
+            minwidth=58,
             stretch=False,
             anchor="center",
         )
@@ -580,6 +581,7 @@ class BackupJobDialog(tk.Toplevel):
             "<ButtonRelease-1>",
             self._handle_mysql_database_click,
         )
+        self._install_database_header_checkbox()
         self._populate_mysql_databases(self.saved_mysql_databases)
         self.load_button = ttk.Button(
             self.mysql_page,
@@ -717,19 +719,123 @@ class BackupJobDialog(tk.Toplevel):
         else:
             self.database_tree.item(item, text="✓" if checked else "□")
 
+    def _update_mysql_database_header_checkbox(self) -> None:
+        names = {
+            self.database_tree.set(item, "database")
+            for item in self.database_tree.get_children()
+        }
+        checked = bool(names) and names.issubset(
+            self.checked_mysql_databases
+        )
+        image = (
+            self.checkbox_checked_image
+            if checked
+            else self.checkbox_unchecked_image
+        )
+        options: dict[str, object] = {"text": "", "anchor": "center"}
+        if image is not None:
+            options["image"] = image
+        self.database_tree.heading("#0", **options)
+        header_check = getattr(
+            self,
+            "_database_header_check_widget",
+            None,
+        )
+        if header_check is not None:
+            header_check.configure(
+                image=image or "",
+                text="" if image is not None else ("☑" if checked else "□"),
+            )
+
+    def _install_database_header_checkbox(self) -> None:
+        header_check = tk.Label(
+            self.database_tree,
+            image=self.checkbox_unchecked_image or "",
+            text="" if self.checkbox_unchecked_image is not None else "□",
+            bg="#FAFAFA",
+            fg=TEXT,
+            bd=0,
+            padx=0,
+            pady=0,
+            cursor="hand2",
+            takefocus=False,
+            highlightthickness=0,
+        )
+        header_check.bind(
+            "<ButtonRelease-1>",
+            self._handle_database_header_check_click,
+        )
+        header_check.bind(
+            "<Enter>",
+            lambda _event: header_check.configure(bg="#F0F0F0"),
+        )
+        header_check.bind(
+            "<Leave>",
+            lambda _event: header_check.configure(bg="#FAFAFA"),
+        )
+        self._database_header_check_widget = header_check
+        self.database_tree.bind(
+            "<Configure>",
+            self._place_database_header_checkbox,
+            add="+",
+        )
+        self.database_tree.bind(
+            "<Map>",
+            self._place_database_header_checkbox,
+            add="+",
+        )
+        self.database_tree.after_idle(self._place_database_header_checkbox)
+
+    def _place_database_header_checkbox(
+        self,
+        _event: tk.Event | None = None,
+    ) -> None:
+        header_check = getattr(
+            self,
+            "_database_header_check_widget",
+            None,
+        )
+        if header_check is None or not self.database_tree.winfo_exists():
+            return
+        children = self.database_tree.get_children()
+        bbox: tuple[int, ...] = ()
+        if children:
+            bbox = self.database_tree.bbox(children[0], "#0")
+        if bbox:
+            cell_x, cell_bottom, cell_width, _cell_height = bbox
+        else:
+            cell_x = 2
+            cell_bottom = 40
+            cell_width = int(
+                float(self.database_tree.column("#0", "width"))
+            )
+        header_check.place(
+            x=cell_x,
+            y=2,
+            width=max(22, cell_width - 1),
+            height=max(22, cell_bottom - 3),
+        )
+
+    def _handle_database_header_check_click(
+        self,
+        _event: tk.Event,
+    ) -> str:
+        self._toggle_all_mysql_databases()
+        return "break"
+
     def _handle_mysql_database_click(
         self,
         event: tk.Event,
-    ) -> None:
+    ) -> str | None:
         if (
             self.database_tree.identify_region(event.x, event.y)
             not in {"tree", "cell"}
             or self.database_tree.identify_column(event.x) != "#0"
         ):
-            return
+            return None
         item = self.database_tree.identify_row(event.y)
         if not item:
-            return
+            return None
         name = self.database_tree.set(item, "database")
         if name in self.checked_mysql_databases:
             self.checked_mysql_databases.remove(name)
@@ -739,6 +845,8 @@ class BackupJobDialog(tk.Toplevel):
             item,
             name in self.checked_mysql_databases,
         )
+        self._update_mysql_database_header_checkbox()
+        return "break"
 
     def _toggle_all_mysql_databases(self) -> None:
         items = self.database_tree.get_children()
@@ -759,6 +867,7 @@ class BackupJobDialog(tk.Toplevel):
                 item,
                 name in self.checked_mysql_databases,
             )
+        self._update_mysql_database_header_checkbox()
 
     def _block_database_checkbox_resize(self, event: tk.Event) -> str | None:
         if (
@@ -972,6 +1081,7 @@ class BackupJobDialog(tk.Toplevel):
                 item,
                 name in self.checked_mysql_databases,
             )
+        self._update_mysql_database_header_checkbox()
         self.database_tree.tag_configure("row_even", background=PANEL)
         self.database_tree.tag_configure("row_odd", background=PANEL_ALT)
         self.after_idle(self._sync_database_scrollbar)

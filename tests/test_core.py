@@ -18,6 +18,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 import app as app_module
 import backup_engine
+import backup_job_dialog
 import config_store
 import notifications
 from app import (
@@ -731,6 +732,90 @@ class ConfigurationAndSchedulingTests(unittest.TestCase):
         self.assertNotIn("job-1", refreshed)
         self.assertEqual(len(refreshed), 1)
         self.assertIsNotNone(refreshed[0])
+
+    def test_job_header_checkbox_tracks_all_selection(self) -> None:
+        class FakeTree:
+            def __init__(self) -> None:
+                self.header: dict[str, object] = {}
+
+            def heading(self, column: str, **options: object) -> None:
+                self.header = {"column": column, **options}
+
+        app = BackupApp.__new__(BackupApp)
+        app.job_tree = FakeTree()
+        app.backup_jobs = [{"id": "job-1"}, {"id": "job-2"}]
+        app.checkbox_checked_image = object()
+        app.checkbox_unchecked_image = object()
+        app.checkbox_checked_header_image = object()
+        app.checkbox_unchecked_header_image = object()
+
+        app.job_checked = set()
+        app._update_job_header_checkbox()
+        self.assertIs(
+            app.job_tree.header["image"],
+            app.checkbox_unchecked_header_image,
+        )
+
+        app.job_checked = {"job-1"}
+        app._update_job_header_checkbox()
+        self.assertIs(
+            app.job_tree.header["image"],
+            app.checkbox_unchecked_header_image,
+        )
+
+        app.job_checked = {"job-1", "job-2"}
+        app._update_job_header_checkbox()
+        self.assertIs(
+            app.job_tree.header["image"],
+            app.checkbox_checked_header_image,
+        )
+        self.assertEqual(app.job_tree.header["text"], "")
+
+    def test_database_header_checkbox_tracks_all_selection(self) -> None:
+        class FakeTree:
+            def __init__(self) -> None:
+                self.header: dict[str, object] = {}
+
+            @staticmethod
+            def get_children() -> tuple[str, ...]:
+                return ("row-1", "row-2")
+
+            @staticmethod
+            def set(item: str, column: str) -> str:
+                del column
+                return {"row-1": "db-a", "row-2": "db-b"}[item]
+
+            def heading(self, column: str, **options: object) -> None:
+                self.header = {"column": column, **options}
+
+        dialog = backup_job_dialog.BackupJobDialog.__new__(
+            backup_job_dialog.BackupJobDialog
+        )
+        dialog.database_tree = FakeTree()
+        dialog.checkbox_checked_image = object()
+        dialog.checkbox_unchecked_image = object()
+
+        dialog.checked_mysql_databases = set()
+        dialog._update_mysql_database_header_checkbox()
+        self.assertIs(
+            dialog.database_tree.header["image"],
+            dialog.checkbox_unchecked_image,
+        )
+
+        dialog.checked_mysql_databases = {"db-a"}
+        dialog._update_mysql_database_header_checkbox()
+        self.assertIs(
+            dialog.database_tree.header["image"],
+            dialog.checkbox_unchecked_image,
+        )
+
+        dialog.checked_mysql_databases = {"db-a", "db-b"}
+        dialog._update_mysql_database_header_checkbox()
+        self.assertIs(
+            dialog.database_tree.header["image"],
+            dialog.checkbox_checked_image,
+        )
+        self.assertEqual(dialog.database_tree.header["text"], "")
 
     def test_legacy_config_is_migrated_to_independent_jobs(self) -> None:
         with tempfile.TemporaryDirectory(prefix="dba_config_") as temp:
