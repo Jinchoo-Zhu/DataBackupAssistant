@@ -72,6 +72,7 @@ ACCENT_SOFT = "#E8F0FE"
 SUCCESS = "#107C10"
 DANGER = "#D13438"
 BORDER = "#D0D0D0"
+TABLE_BORDER = "#000000"
 
 
 def resource_path(name: str) -> Path:
@@ -810,7 +811,8 @@ class BackupApp:
         outer = tk.Frame(
             parent,
             bg=CARD,
-            highlightbackground=BORDER,
+            highlightbackground=TABLE_BORDER,
+            highlightcolor=TABLE_BORDER,
             highlightthickness=1,
         )
         outer.grid(
@@ -848,7 +850,8 @@ class BackupApp:
         tree_frame = tk.Frame(
             self.task_card,
             bg=CARD,
-            highlightbackground=BORDER,
+            highlightbackground=TABLE_BORDER,
+            highlightcolor=TABLE_BORDER,
             highlightthickness=1,
         )
         tree_frame.pack(fill="both", expand=True)
